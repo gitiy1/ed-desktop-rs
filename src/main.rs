@@ -1,5 +1,6 @@
 mod api;
 mod downloader;
+mod filenames;
 mod i18n;
 mod lcp;
 mod network;
@@ -7,10 +8,20 @@ mod settings;
 mod ui;
 
 fn main() {
-    if dotenvy::dotenv().is_err() {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let demo_page = arguments
+        .iter()
+        .position(|arg| arg == "--demo")
+        .map(|index| {
+            arguments
+                .get(index + 1)
+                .cloned()
+                .unwrap_or_else(|| "library".to_string())
+        });
+    if demo_page.is_none() && dotenvy::dotenv().is_err() {
         let _ = dotenvy::from_path("../.env");
     }
-    ui::run();
+    ui::run(demo_page);
 }
 
 #[cfg(test)]
@@ -35,9 +46,20 @@ mod live_tests {
             .first()
             .expect("purchased bookshelf must contain at least one book");
         let directory = tempfile::tempdir().unwrap();
-        let encrypted = directory.path().join("sample.books.epub");
-        downloader::download_legacy(&session, book, &encrypted, 4, &proxy, |_| {}).unwrap();
-        let plain = directory.path().join("sample.epub");
+        let stems = crate::filenames::export_stems(&books);
+        let stem = &stems[&book.id()];
+        let encrypted = directory.path().join(format!("{stem}.books.epub"));
+        downloader::download_legacy(
+            &session,
+            book,
+            &encrypted,
+            4,
+            &proxy,
+            std::sync::Arc::new(downloader::DownloadControl::default()),
+            |_| {},
+        )
+        .unwrap();
+        let plain = directory.path().join(format!("{stem}.epub"));
         lcp::decrypt_epub(&encrypted, &plain, &[session.email]).unwrap();
 
         let mut archive = ZipArchive::new(File::open(plain).unwrap()).unwrap();

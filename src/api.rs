@@ -49,10 +49,6 @@ impl Book {
     pub fn author(&self) -> String {
         value_string(&self.raw, &["author", "authorName"]).unwrap_or_default()
     }
-
-    pub fn filename(&self) -> Option<String> {
-        value_string(&self.raw, &["fileName", "filename"])
-    }
 }
 
 fn value_string(value: &Value, keys: &[&str]) -> Option<String> {

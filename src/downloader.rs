@@ -10,7 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,78 @@ pub struct DownloadProgress {
 }
 
 type ProgressCallback = Arc<dyn Fn(DownloadProgress) + Send + Sync>;
+
+#[derive(Default)]
+pub struct DownloadControl {
+    paused: Mutex<bool>,
+    resumed: Condvar,
+    cancelled: AtomicBool,
+}
+
+#[derive(Debug)]
+struct DownloadCancelled;
+
+impl std::fmt::Display for DownloadCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Download stopped; partial files retained")
+    }
+}
+
+impl std::error::Error for DownloadCancelled {}
+
+#[derive(Debug)]
+struct TransportReadError(std::io::Error);
+
+impl std::fmt::Display for TransportReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for TransportReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+impl DownloadControl {
+    pub fn pause(&self) {
+        *self.paused.lock().expect("download control poisoned") = true;
+    }
+
+    pub fn resume(&self) {
+        *self.paused.lock().expect("download control poisoned") = false;
+        self.resumed.notify_all();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        *self.paused.lock().expect("download control poisoned")
+    }
+
+    pub fn cancel(&self) {
+        let _paused = self.paused.lock().expect("download control poisoned");
+        self.cancelled.store(true, Ordering::Release);
+        self.resumed.notify_all();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn wait_until_resumed(&self) -> Result<()> {
+        let mut paused = self.paused.lock().expect("download control poisoned");
+        while *paused && !self.is_cancelled() {
+            paused = self
+                .resumed
+                .wait(paused)
+                .expect("download control poisoned");
+        }
+        if self.is_cancelled() {
+            return Err(DownloadCancelled.into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RangeMeta {
@@ -36,11 +108,15 @@ struct RangeJob {
     path: PathBuf,
 }
 
+struct RangeOptions {
+    total: u64,
+    workers: usize,
+}
+
 struct Reporter {
     received: AtomicU64,
     total: AtomicU64,
-    started: Instant,
-    last_sent: Mutex<Instant>,
+    last_sent: Mutex<(Instant, u64)>,
     callback: ProgressCallback,
 }
 
@@ -49,8 +125,7 @@ impl Reporter {
         Self {
             received: AtomicU64::new(initial),
             total: AtomicU64::new(total),
-            started: Instant::now(),
-            last_sent: Mutex::new(Instant::now() - Duration::from_secs(1)),
+            last_sent: Mutex::new((Instant::now() - Duration::from_secs(1), initial)),
             callback,
         }
     }
@@ -59,14 +134,14 @@ impl Reporter {
         let received = self.received.fetch_add(amount, Ordering::Relaxed) + amount;
         let mut last_sent = self.last_sent.lock().expect("progress timestamp poisoned");
         let total = self.total.load(Ordering::Relaxed);
-        if last_sent.elapsed() >= Duration::from_millis(120) || received >= total {
-            let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
+        if last_sent.0.elapsed() >= Duration::from_millis(120) || received >= total {
+            let elapsed = last_sent.0.elapsed().as_secs_f64().max(0.001);
             (self.callback)(DownloadProgress {
                 received,
                 total,
-                bytes_per_second: received as f64 / elapsed,
+                bytes_per_second: received.saturating_sub(last_sent.1) as f64 / elapsed,
             });
-            *last_sent = Instant::now();
+            *last_sent = (Instant::now(), received);
         }
     }
 }
@@ -77,6 +152,7 @@ pub fn download_legacy(
     destination: &Path,
     workers: usize,
     proxy: &ProxySettings,
+    control: Arc<DownloadControl>,
     callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
 ) -> Result<PathBuf> {
     if book.id() == "?" {
@@ -88,9 +164,18 @@ pub fn download_legacy(
     let client = network::http_client(Duration::from_secs(90), "okhttp/4.12.0", proxy)?;
     let callback: ProgressCallback = Arc::new(callback);
     let partial = append_suffix(destination, ".part");
+    control.wait_until_resumed()?;
 
     if workers <= 1 {
-        let result = download_sequential(&client, session, book, destination, &partial, callback);
+        let result = download_sequential(
+            &client,
+            session,
+            book,
+            destination,
+            &partial,
+            control,
+            callback,
+        );
         if result.is_ok() {
             let _ = fs::remove_dir_all(append_suffix(destination, ".parts"));
         }
@@ -114,13 +199,22 @@ pub fn download_legacy(
             session,
             book,
             destination,
-            total,
-            workers,
+            RangeOptions { total, workers },
+            control.clone(),
             Arc::clone(&callback),
         ) {
             Ok(path) => Ok(path),
             Err(range_error) => {
-                match download_sequential(&client, session, book, destination, &partial, callback) {
+                control.wait_until_resumed()?;
+                match download_sequential(
+                    &client,
+                    session,
+                    book,
+                    destination,
+                    &partial,
+                    control,
+                    callback,
+                ) {
                     Ok(path) => {
                         let _ = fs::remove_dir_all(append_suffix(destination, ".parts"));
                         Ok(path)
@@ -133,7 +227,15 @@ pub fn download_legacy(
         }
     } else if probe.status().is_success() {
         let total = probe.content_length().unwrap_or(0);
-        let result = stream_response(probe, destination, &partial, false, total, callback);
+        let result = stream_response(
+            probe,
+            destination,
+            &partial,
+            false,
+            total,
+            control,
+            callback,
+        );
         if result.is_ok() {
             let _ = fs::remove_dir_all(append_suffix(destination, ".parts"));
         }
@@ -154,16 +256,19 @@ fn download_sequential(
     book: &Book,
     destination: &Path,
     partial: &Path,
+    control: Arc<DownloadControl>,
     callback: ProgressCallback,
 ) -> Result<PathBuf> {
     let mut last_error = None;
     for attempt in 0..3 {
+        control.wait_until_resumed()?;
         match download_sequential_once(
             client,
             session,
             book,
             destination,
             partial,
+            Arc::clone(&control),
             Arc::clone(&callback),
         ) {
             Ok(path) => return Ok(path),
@@ -183,8 +288,10 @@ fn download_sequential_once(
     book: &Book,
     destination: &Path,
     partial: &Path,
+    control: Arc<DownloadControl>,
     callback: ProgressCallback,
 ) -> Result<PathBuf> {
+    control.wait_until_resumed()?;
     let offset = fs::metadata(partial)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
@@ -193,6 +300,24 @@ fn download_sequential_once(
         request = request.header(RANGE, format!("bytes={offset}-"));
     }
     let response = request.send().context("request legacy book download")?;
+    if response.status() == StatusCode::RANGE_NOT_SATISFIABLE && offset > 0 {
+        let completed_total = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("bytes */"))
+            .and_then(|value| value.parse::<u64>().ok());
+        if completed_total == Some(offset) {
+            control.wait_until_resumed()?;
+            replace_file(partial, destination)?;
+            callback(DownloadProgress {
+                received: offset,
+                total: offset,
+                bytes_per_second: 0.0,
+            });
+            return Ok(destination.to_path_buf());
+        }
+    }
     if !response.status().is_success() {
         let status = response.status();
         let message = response.text().unwrap_or_default();
@@ -217,13 +342,22 @@ fn download_sequential_once(
                 .map(|length| length + if append { offset } else { 0 })
         })
         .unwrap_or(0);
-    stream_response(response, destination, partial, append, total, callback)
+    stream_response(
+        response,
+        destination,
+        partial,
+        append,
+        total,
+        control,
+        callback,
+    )
 }
 
 fn is_network_error(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
+    error.chain().any(|cause| {
+        cause.downcast_ref::<reqwest::Error>().is_some()
+            || cause.downcast_ref::<TransportReadError>().is_some()
+    })
 }
 
 fn stream_response(
@@ -232,6 +366,7 @@ fn stream_response(
     partial: &Path,
     append: bool,
     total: u64,
+    control: Arc<DownloadControl>,
     callback: ProgressCallback,
 ) -> Result<PathBuf> {
     let existing = if append {
@@ -253,14 +388,17 @@ fn stream_response(
     loop {
         let count = response
             .read(&mut buffer)
+            .map_err(TransportReadError)
             .context("read legacy download stream")?;
         if count == 0 {
             break;
         }
+        control.wait_until_resumed()?;
         output
             .write_all(&buffer[..count])
             .context("write partial EPUB")?;
         reporter.add(count as u64);
+        control.wait_until_resumed()?;
     }
     output.flush().context("flush downloaded EPUB")?;
     output.sync_all().context("sync downloaded EPUB")?;
@@ -270,6 +408,7 @@ fn stream_response(
             "Download ended early: {downloaded_size}/{total} bytes. The partial file is kept for resume."
         ));
     }
+    control.wait_until_resumed()?;
     drop(output);
     replace_file(partial, destination)?;
     Ok(destination.to_path_buf())
@@ -280,10 +419,11 @@ fn download_ranged(
     session: &Session,
     book: &Book,
     destination: &Path,
-    total: u64,
-    workers: usize,
+    options: RangeOptions,
+    control: Arc<DownloadControl>,
     callback: ProgressCallback,
 ) -> Result<PathBuf> {
+    let RangeOptions { total, workers } = options;
     if total == 0 {
         return Err(anyhow!("Server returned an empty book."));
     }
@@ -317,6 +457,7 @@ fn download_ranged(
 
     let mut initial = 0;
     for job in &jobs {
+        control.wait_until_resumed()?;
         let expected = job.end - job.start + 1;
         if let Ok(metadata) = fs::metadata(&job.path) {
             initial += metadata.len().min(expected);
@@ -345,6 +486,7 @@ fn download_ranged(
             let failed = Arc::clone(&failed);
             let error = Arc::clone(&error);
             let reporter = Arc::clone(&reporter);
+            let control = Arc::clone(&control);
             scope.spawn(move || {
                 loop {
                     if failed.load(Ordering::Acquire) {
@@ -352,7 +494,9 @@ fn download_ranged(
                     }
                     let job = queue.lock().expect("range queue poisoned").pop_front();
                     let Some(job) = job else { break };
-                    if let Err(problem) = fetch_range(&client, session, book, &job, &reporter) {
+                    if let Err(problem) =
+                        fetch_range(&client, session, book, &job, &reporter, &control)
+                    {
                         failed.store(true, Ordering::Release);
                         *error.lock().expect("range error poisoned") = Some(problem.to_string());
                         break;
@@ -378,7 +522,7 @@ fn download_ranged(
                 actual_total - 1
             )),
         };
-        fetch_range(client, session, book, &tail, &reporter)?;
+        fetch_range(client, session, book, &tail, &reporter, &control)?;
         jobs.push(tail);
         covered_total = actual_total;
         actual_total = reporter.total.load(Ordering::Acquire);
@@ -387,6 +531,7 @@ fn download_ranged(
     let partial = append_suffix(destination, ".part");
     let mut output = BufWriter::new(File::create(&partial).context("create merged EPUB")?);
     for job in &jobs {
+        control.wait_until_resumed()?;
         let expected = job.end - job.start + 1;
         let actual = fs::metadata(&job.path)
             .with_context(|| format!("missing range {}-{}", job.start, job.end))?
@@ -413,6 +558,8 @@ fn download_ranged(
             "Merged file has {merged_size} bytes, expected {actual_total}. Range parts have been retained for resume."
         ));
     }
+    control.wait_until_resumed()?;
+    drop(output);
     replace_file(&partial, destination)?;
     let _ = fs::remove_dir_all(&parts_dir);
     Ok(destination.to_path_buf())
@@ -424,6 +571,28 @@ fn fetch_range(
     book: &Book,
     job: &RangeJob,
     reporter: &Reporter,
+    control: &DownloadControl,
+) -> Result<()> {
+    for attempt in 0..3 {
+        control.wait_until_resumed()?;
+        match fetch_range_once(client, session, book, job, reporter, control) {
+            Ok(()) => return Ok(()),
+            Err(error) if is_network_error(&error) && attempt < 2 => {
+                thread::sleep(Duration::from_millis(250 * (attempt + 1)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("last range attempt returns its error")
+}
+
+fn fetch_range_once(
+    client: &reqwest::blocking::Client,
+    session: &Session,
+    book: &Book,
+    job: &RangeJob,
+    reporter: &Reporter,
+    control: &DownloadControl,
 ) -> Result<()> {
     let expected = job.end - job.start + 1;
     let mut offset = fs::metadata(&job.path)
@@ -437,6 +606,7 @@ fn fetch_range(
         offset = 0;
     }
     let start = job.start + offset;
+    control.wait_until_resumed()?;
     let response = old_download_request(client, session, book)
         .header(RANGE, format!("bytes={start}-{}", job.end))
         .send()
@@ -469,14 +639,19 @@ fn fetch_range(
     let mut response = response;
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        let count = response.read(&mut buffer).context("read range response")?;
+        let count = response
+            .read(&mut buffer)
+            .map_err(TransportReadError)
+            .context("read range response")?;
         if count == 0 {
             break;
         }
+        control.wait_until_resumed()?;
         output
             .write_all(&buffer[..count])
             .context("write range part")?;
         reporter.add(count as u64);
+        control.wait_until_resumed()?;
     }
     output.flush().context("flush range part")?;
     output.sync_all().context("sync range part")?;
@@ -646,6 +821,215 @@ mod tests {
     }
 
     #[test]
+    fn download_control_blocks_workers_until_resume() {
+        let control = Arc::new(DownloadControl::default());
+        control.pause();
+        let worker_control = Arc::clone(&control);
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            worker_control.wait_until_resumed().unwrap();
+            sent.send(()).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(30)).is_err());
+        control.resume();
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+    }
+
+    fn partial_bytes(output: &Path) -> u64 {
+        let stream_bytes = fs::metadata(append_suffix(output, ".part"))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let range_bytes = fs::read_dir(append_suffix(output, ".parts"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "part"))
+            .filter_map(|entry| entry.metadata().ok())
+            .map(|metadata| metadata.len())
+            .sum::<u64>();
+        stream_bytes + range_bytes
+    }
+
+    #[test]
+    fn real_http_stream_and_parallel_workers_pause_then_resume_without_data_loss() {
+        for workers in [1, 3] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let content: Vec<u8> = (0..512 * 1024).map(|index| (index % 239) as u8).collect();
+            let request_count = if workers == 1 { 1 } else { workers + 1 };
+            let server = start_range_server(listener, content.clone(), request_count, None);
+            let directory = tempfile::tempdir().unwrap();
+            let output = directory.path().join("pause.epub");
+            let session = make_session(format!("http://{address}/api/v4/"));
+            let control = Arc::new(DownloadControl::default());
+            let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let thread_control = control.clone();
+            let thread_output = output.clone();
+            let worker = thread::spawn(move || {
+                let did_pause = AtomicBool::new(false);
+                let callback_control = thread_control.clone();
+                let result = download_legacy(
+                    &session,
+                    &test_book(),
+                    &thread_output,
+                    workers,
+                    &ProxySettings::default(),
+                    thread_control,
+                    move |_| {
+                        if !did_pause.swap(true, Ordering::AcqRel) {
+                            callback_control.pause();
+                            paused_tx.send(()).unwrap();
+                        }
+                    },
+                );
+                done_tx.send(result).unwrap();
+            });
+            paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
+            let paused_size = partial_bytes(&output);
+            assert!(paused_size > 0 && paused_size < content.len() as u64);
+            assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
+            assert_eq!(
+                partial_bytes(&output),
+                paused_size,
+                "paused workers kept writing"
+            );
+            control.resume();
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            worker.join().unwrap();
+            server.join().unwrap();
+            assert_eq!(fs::read(&output).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn cancelling_a_paused_download_retains_partial_for_a_later_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let content: Vec<u8> = (0..512 * 1024).map(|index| (index % 241) as u8).collect();
+        let server = start_range_server(listener, content.clone(), 2, None);
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("cancel.epub");
+        let session = make_session(format!("http://{address}/api/v4/"));
+        let control = Arc::new(DownloadControl::default());
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let thread_control = control.clone();
+        let thread_output = output.clone();
+        let thread_session = session.clone();
+        let worker = thread::spawn(move || {
+            let callback_control = thread_control.clone();
+            download_legacy(
+                &thread_session,
+                &test_book(),
+                &thread_output,
+                1,
+                &ProxySettings::default(),
+                thread_control,
+                move |_| {
+                    callback_control.pause();
+                    paused_tx.send(()).unwrap();
+                },
+            )
+        });
+        paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        control.cancel();
+        assert!(worker.join().unwrap().is_err());
+        assert!(partial_bytes(&output) > 0);
+        assert!(!output.exists());
+        download_legacy(
+            &session,
+            &test_book(),
+            &output,
+            1,
+            &ProxySettings::default(),
+            Arc::new(DownloadControl::default()),
+            |_| {},
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(fs::read(output).unwrap(), content);
+    }
+
+    #[test]
+    fn a_range_reconnects_at_its_saved_offset_if_the_server_closes_while_paused() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let content: Vec<u8> = (0..256 * 1024).map(|index| (index % 227) as u8).collect();
+        let served = content.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert_eq!(
+                read_request(&mut stream).unwrap(),
+                format!("bytes=0-{}", served.len() - 1)
+            );
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1,
+                served.len(),
+                served.len()
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&served[..32768]).unwrap();
+            stream.flush().unwrap();
+            drop(stream);
+            let (mut stream, _) = listener.accept().unwrap();
+            assert_eq!(
+                read_request(&mut stream).unwrap(),
+                format!("bytes=32768-{}", served.len() - 1)
+            );
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 32768-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len() - 1,
+                served.len(),
+                served.len() - 32768
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&served[32768..]).unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("reconnect.epub");
+        let session = make_session(format!("http://{address}/api/v4/"));
+        let control = Arc::new(DownloadControl::default());
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let thread_control = control.clone();
+        let thread_output = output.clone();
+        let worker = thread::spawn(move || {
+            let client =
+                network::http_client(Duration::from_secs(5), "test", &ProxySettings::default())
+                    .unwrap();
+            let callback_control = thread_control.clone();
+            let paused = AtomicBool::new(false);
+            download_ranged(
+                &client,
+                &session,
+                &test_book(),
+                &thread_output,
+                RangeOptions {
+                    total: 256 * 1024,
+                    workers: 1,
+                },
+                thread_control,
+                Arc::new(move |_| {
+                    if !paused.swap(true, Ordering::AcqRel) {
+                        callback_control.pause();
+                        paused_tx.send(()).unwrap();
+                    }
+                }),
+            )
+        });
+        paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        control.resume();
+        worker.join().unwrap().unwrap();
+        server.join().unwrap();
+        assert_eq!(fs::read(output).unwrap(), content);
+    }
+
+    #[test]
     fn small_files_use_no_more_ranges_than_bytes() {
         assert_eq!(split_ranges(2, 8), vec![(0, 0), (1, 1)]);
         assert_eq!(split_ranges(1, 4), vec![(0, 0)]);
@@ -672,6 +1056,7 @@ mod tests {
             &output,
             3,
             &ProxySettings::default(),
+            Arc::new(DownloadControl::default()),
             |_| {},
         )
         .unwrap();
@@ -698,12 +1083,39 @@ mod tests {
             &output,
             1,
             &ProxySettings::default(),
+            Arc::new(DownloadControl::default()),
             |_| {},
         )
         .unwrap();
         server.join().unwrap();
         assert_eq!(fs::read(downloaded).unwrap(), content);
         assert!(!partial.exists());
+    }
+
+    #[test]
+    fn sequential_resume_recognizes_a_fully_received_partial() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert_eq!(read_request(&mut stream).as_deref(), Some("bytes=4-"));
+            stream.write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */4\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("complete.epub");
+        fs::write(append_suffix(&output, ".part"), b"book").unwrap();
+        download_legacy(
+            &make_session(format!("http://{address}/api/v4/")),
+            &test_book(),
+            &output,
+            1,
+            &ProxySettings::default(),
+            Arc::new(DownloadControl::default()),
+            |_| {},
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(fs::read(output).unwrap(), b"book");
     }
 
     #[test]
@@ -721,6 +1133,7 @@ mod tests {
             &output,
             3,
             &ProxySettings::default(),
+            Arc::new(DownloadControl::default()),
             |_| {},
         )
         .unwrap();

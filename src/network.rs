@@ -2,7 +2,7 @@ use crate::settings::{ProxyMode, ProxyProtocol, ProxySettings};
 use anyhow::{Context, Result, anyhow};
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::{NoProxy, Proxy};
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -74,7 +74,16 @@ fn system_proxy_url() -> Option<(String, String)> {
     #[cfg(target_os = "windows")]
     let (url, bypass) = windows_system_proxy()?;
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    let (url, bypass) = {
+        let output = std::process::Command::new("/usr/sbin/scutil")
+            .arg("--proxy")
+            .output()
+            .ok()?;
+        parse_macos_proxy(&String::from_utf8(output.stdout).ok()?)?
+    };
+
+    #[cfg(target_os = "linux")]
     let (url, bypass) = {
         let proxy = sysproxy::Sysproxy::get_system_proxy().ok()?;
         if !proxy.enable || proxy.host.trim().is_empty() || proxy.port == 0 {
@@ -94,6 +103,50 @@ fn system_proxy_url() -> Option<(String, String)> {
         (format!("{scheme}://{host}:{}", proxy.port), proxy.bypass)
     };
     Some((url, bypass))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_proxy(output: &str) -> Option<(String, String)> {
+    let values: std::collections::HashMap<_, _> = output
+        .lines()
+        .filter_map(|line| line.trim().split_once(" : "))
+        .collect();
+    let bypass = output
+        .split_once("ExceptionsList : <array> {")
+        .and_then(|(_, array)| array.split_once('}'))
+        .map(|(array, _)| {
+            array
+                .lines()
+                .filter_map(|line| line.trim().split_once(" : ").map(|(_, value)| value))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    for protocol in ["SOCKS", "HTTPS", "HTTP"] {
+        if values.get(format!("{protocol}Enable").as_str()) != Some(&"1") {
+            continue;
+        }
+        let host = values.get(format!("{protocol}Proxy").as_str())?;
+        let port = values
+            .get(format!("{protocol}Port").as_str())?
+            .parse::<u16>()
+            .ok()?;
+        if host.is_empty() || port == 0 {
+            continue;
+        }
+        let host = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.to_string()
+        };
+        let scheme = if protocol == "SOCKS" {
+            "socks5h"
+        } else {
+            "http"
+        };
+        return Some((format!("{scheme}://{host}:{port}"), bypass));
+    }
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -209,5 +262,18 @@ mod tests {
             ),
             Some(("socks5h://socks.corp:1080".to_string(), String::new()))
         );
+    }
+
+    #[test]
+    fn macos_effective_proxy_supports_socks_and_exclusions() {
+        let output = "<dictionary> {\n  ExceptionsList : <array> {\n    0 : localhost\n    1 : *.local\n  }\n  HTTPEnable : 1\n  HTTPProxy : proxy.example.test\n  HTTPPort : 8080\n  SOCKSEnable : 1\n  SOCKSProxy : ::1\n  SOCKSPort : 1080\n}";
+        assert_eq!(
+            parse_macos_proxy(output),
+            Some((
+                "socks5h://[::1]:1080".to_string(),
+                "localhost,*.local".to_string()
+            ))
+        );
+        assert_eq!(parse_macos_proxy("<dictionary> {}"), None);
     }
 }
