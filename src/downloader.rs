@@ -655,7 +655,7 @@ fn fetch_range_once(
     }
     output.flush().context("flush range part")?;
     output.sync_all().context("sync range part")?;
-    let actual = fs::metadata(&job.path)?.len();
+    let actual = output.metadata().context("inspect open range part")?.len();
     if actual != expected {
         return Err(anyhow!(
             "range {}-{} returned {actual}/{expected} bytes",
@@ -837,18 +837,31 @@ mod tests {
     }
 
     fn partial_bytes(output: &Path) -> u64 {
-        let stream_bytes = fs::metadata(append_suffix(output, ".part"))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let range_bytes = fs::read_dir(append_suffix(output, ".parts"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "part"))
-            .filter_map(|entry| entry.metadata().ok())
-            .map(|metadata| metadata.len())
-            .sum::<u64>();
-        stream_bytes + range_bytes
+        fn readable_bytes(path: &Path) -> u64 {
+            // Windows can retain a stale directory-entry size while the writer
+            // is open. Count bytes actually readable from the file instead.
+            match File::open(path) {
+                Ok(mut file) => std::io::copy(&mut file, &mut std::io::sink())
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(error) => panic!("open {}: {error}", path.display()),
+            }
+        }
+
+        let mut received = readable_bytes(&append_suffix(output, ".part"));
+        match fs::read_dir(append_suffix(output, ".parts")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = entry.expect("read range directory entry").path();
+                    if path.extension().is_some_and(|ext| ext == "part") {
+                        received += readable_bytes(&path);
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("read range directory for {}: {error}", output.display()),
+        }
+        received
     }
 
     #[test]
@@ -889,7 +902,11 @@ mod tests {
             paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
             let paused_size = partial_bytes(&output);
-            assert!(paused_size > 0 && paused_size < content.len() as u64);
+            assert!(
+                paused_size > 0 && paused_size < content.len() as u64,
+                "{workers} workers paused with {paused_size}/{} readable bytes",
+                content.len()
+            );
             assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
             assert_eq!(
                 partial_bytes(&output),
