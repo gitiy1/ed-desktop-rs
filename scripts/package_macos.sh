@@ -17,7 +17,7 @@ if [ ! -x "$binary" ]; then
     exit 1
 fi
 
-lipo -verify_arch arm64 "$binary"
+lipo "$binary" -verify_arch arm64
 version=$(cargo metadata --locked --no-deps --format-version 1 | python3 -c '
 import json, sys
 metadata = json.load(sys.stdin)

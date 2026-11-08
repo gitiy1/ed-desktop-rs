@@ -34,7 +34,7 @@ jobs:
       - run: cargo build --release --locked
       - name: Verify macOS ARM64 artifact
         if: runner.os == 'macOS'
-        run: lipo -verify_arch arm64 target/release/endao-desktop
+        run: lipo target/release/endao-desktop -verify_arch arm64
       - name: Package macOS app and disk image
         if: runner.os == 'macOS'
         run: sh scripts/package_macos.sh target/release
