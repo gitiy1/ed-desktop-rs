@@ -1,0 +1,1 @@
+This is the `xattr` 0.2.3 crate source under its upstream MIT/Apache-2.0 licenses. The local change maps Linux `ENOATTR` handling to `ENODATA`, the Linux errno used when an extended attribute is absent. GPUI 0.2.2 pulls this older crate through `zed-async-tar`; the patch keeps Linux builds working with current `libc` releases.
