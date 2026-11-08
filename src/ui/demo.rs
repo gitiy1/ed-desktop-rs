@@ -12,6 +12,7 @@ impl AppView {
         view.workers_text = "4".to_string();
         view.settings = AppSettings {
             language: LanguagePreference::English,
+            theme: ThemePreference::Light,
             ..AppSettings::default()
         };
         view.output_text = "~/Downloads/Endao Books".to_string();

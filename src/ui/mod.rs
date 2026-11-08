@@ -14,12 +14,13 @@ use crate::filenames::export_stems;
 use crate::i18n::{self, LanguagePreference, Locale, Text};
 use crate::lcp;
 use crate::settings::{self, AppSettings, ProxyMode, ProxyProtocol};
+use crate::theme::{Palette, ThemePreference};
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, FocusHandle, IntoElement, KeyDownEvent, Render,
-    SharedString, Styled, Window, WindowBounds, WindowOptions, div, prelude::*, px, relative, rgb,
-    size,
+    SharedString, Styled, Window, WindowAppearance, WindowBounds, WindowOptions, div, prelude::*,
+    px, relative, rgb, size,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -187,6 +188,8 @@ pub struct AppView {
     events_rx: Receiver<(u64, UiEvent)>,
     epoch: u64,
     listener_started: bool,
+    system_appearance: WindowAppearance,
+    appearance_subscription: Option<gpui::Subscription>,
     busy: bool,
     persist_settings: bool,
     demo: bool,
@@ -214,6 +217,17 @@ impl AppView {
 
     fn text(&self, key: Text) -> &'static str {
         i18n::text(self.locale(), key)
+    }
+
+    fn palette(&self) -> Palette {
+        self.settings.theme.palette(self.system_appearance)
+    }
+
+    fn system_appearance_changed(&mut self, appearance: WindowAppearance, cx: &mut Context<Self>) {
+        self.system_appearance = appearance;
+        if self.settings.theme == ThemePreference::System {
+            cx.notify();
+        }
     }
 
     fn new(cx: &mut Context<Self>) -> Self {
@@ -244,17 +258,24 @@ impl AppView {
             events_rx,
             epoch: 0,
             listener_started: false,
+            system_appearance: cx.window_appearance(),
+            appearance_subscription: None,
             busy: false,
             persist_settings: true,
             demo: false,
         }
     }
 
-    fn start_listener(&mut self, window: &Window, cx: &mut Context<Self>) {
+    fn start_listener(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.listener_started {
             return;
         }
         self.listener_started = true;
+        self.system_appearance = window.appearance();
+        self.appearance_subscription =
+            Some(cx.observe_window_appearance(window, |this, window, cx| {
+                this.system_appearance_changed(window.appearance(), cx);
+            }));
         let receiver = self.events_rx.clone();
         cx.spawn_in(window, async move |view, cx| {
             while let Ok((epoch, event)) = receiver.recv().await {

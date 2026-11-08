@@ -226,6 +226,12 @@ impl AppView {
         }
     }
 
+    pub(super) fn set_theme(&mut self, theme: ThemePreference, cx: &mut Context<Self>) {
+        self.settings.theme = theme;
+        self.save_settings();
+        cx.notify();
+    }
+
     pub(super) fn set_language(&mut self, language: LanguagePreference, cx: &mut Context<Self>) {
         let old_locale = self.locale();
         let old_books_message = self.books_loaded_message();

@@ -159,3 +159,47 @@ fn compact_window_keeps_book_list_and_controls_inside_content(cx: &mut TestAppCo
     click(cx, "nav-downloads");
     view.update(cx, |view, _| assert_eq!(view.page, ActivePage::Downloads));
 }
+
+#[gpui::test]
+fn theme_controls_follow_system_changes_and_keep_manual_overrides(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| AppView::demo("settings", cx));
+    cx.simulate_resize(size(px(1180.), px(820.)));
+    click(cx, "theme-dark");
+    view.update(cx, |view, cx| {
+        assert!(view.appearance_subscription.is_some());
+        assert_eq!(view.settings.theme, ThemePreference::Dark);
+        view.system_appearance_changed(WindowAppearance::Light, cx);
+        assert_eq!(view.palette(), Palette::dark());
+    });
+    click(cx, "theme-system");
+    view.update(cx, |view, cx| {
+        assert_eq!(view.settings.theme, ThemePreference::System);
+        assert_eq!(view.palette(), Palette::light());
+        view.system_appearance_changed(WindowAppearance::VibrantDark, cx);
+        assert_eq!(view.palette(), Palette::dark());
+        view.system_appearance_changed(WindowAppearance::VibrantLight, cx);
+        assert_eq!(view.palette(), Palette::light());
+    });
+    click(cx, "theme-light");
+    view.update(cx, |view, cx| {
+        view.system_appearance_changed(WindowAppearance::Dark, cx);
+        assert_eq!(view.settings.theme, ThemePreference::Light);
+        assert_eq!(view.palette(), Palette::light());
+    });
+    click(cx, "language-zh-cn");
+    view.update(cx, |view, _| {
+        assert_eq!(view.text(Text::Appearance), "外观");
+        assert_eq!(view.text(Text::DarkTheme), "深色");
+        assert_eq!(view.text(Text::LightTheme), "浅色");
+    });
+    click(cx, "theme-dark");
+    click(cx, "nav-library");
+    click(cx, "nav-downloads");
+    view.update(cx, |view, _| assert_eq!(view.palette(), Palette::dark()));
+    click(cx, "退出登录");
+    view.update(cx, |view, _| {
+        assert!(view.session.is_none());
+        assert_eq!(view.settings.theme, ThemePreference::Dark);
+        assert_eq!(view.palette(), Palette::dark());
+    });
+}

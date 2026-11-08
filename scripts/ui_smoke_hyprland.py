@@ -29,12 +29,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path("target/debug/endao-desktop"))
     parser.add_argument("--output", type=Path, default=Path("/tmp/endao-ui-review"))
+    parser.add_argument("--check-system-theme", action="store_true",
+                        help="Temporarily switch the GNOME color-scheme setting and restore it afterward")
     args = parser.parse_args()
     if not os.environ.get("WAYLAND_DISPLAY"):
         parser.error("Run from a Hyprland Wayland session")
     args.output.mkdir(parents=True, exist_ok=True)
     old_active = json.loads(run("hyprctl", "-j", "activewindow"))
     old_pointer = json.loads(run("hyprctl", "-j", "cursorpos"))
+    old_color_scheme = run("gsettings", "get", "org.gnome.desktop.interface", "color-scheme").strip() if args.check_system_theme else None
     with (args.output / "native-demo.log").open("w") as log:
         app = subprocess.Popen([str(args.binary.resolve()), "--demo", "library"], stdout=log, stderr=log)
         try:
@@ -72,6 +75,27 @@ def main():
                 run("grim", "-g", f"{x},{y} {width}x{height}", str(args.output / f"{name}.png"))
                 print(f"Captured {name}: {width} x {height}", flush=True)
 
+            def background_pixel():
+                item = current()
+                x, y = item["at"]
+                # Sample the main page gutter, outside cards, controls, and borders.
+                ppm = subprocess.check_output(["grim", "-s", "1", "-t", "ppm", "-g", f"{x + 220},{y + 85} 1x1", "-"])
+                header, dimensions, maximum, pixels = ppm.split(b"\n", 3)
+                if (header, dimensions, maximum) != (b"P6", b"1 1", b"255"):
+                    raise RuntimeError("Unexpected screenshot pixel format")
+                return tuple(pixels[:3])
+
+            def expect_background(expected):
+                for _ in range(25):
+                    actual = background_pixel()
+                    if all(abs(a - b) <= 3 for a, b in zip(actual, expected)):
+                        return
+                    time.sleep(0.12)
+                raise AssertionError(f"Expected page color {expected}, got {actual}")
+
+            dark = (0x12, 0x1b, 0x18)
+            light = (0xf3, 0xf6, 0xf4)
+
             capture("library")
             click(292, 196)  # Select all books.
             capture("selected")
@@ -85,6 +109,32 @@ def main():
             capture("settings")
             click(456, 326)  # Simplified Chinese.
             capture("settings-zh")
+            click(374, 434)  # Explicit dark mode.
+            expect_background(dark)
+            capture("settings-dark")
+            click(80, 121)
+            capture("library-dark")
+            click(80, 171)
+            capture("downloads-dark")
+            click(80, 221)
+            click(436, 434)  # Explicit light mode.
+            expect_background(light)
+            capture("settings-light")
+            click(292, 434)  # Follow the system appearance.
+            capture("settings-system")
+            if args.check_system_theme:
+                for scheme, color in [("prefer-light", light), ("prefer-dark", dark)]:
+                    run("gsettings", "set", "org.gnome.desktop.interface", "color-scheme", scheme)
+                    expect_background(color)
+                    capture("system-" + scheme)
+                click(436, 434)  # Light override survives a dark -> light -> dark OS change.
+                run("gsettings", "set", "org.gnome.desktop.interface", "color-scheme", "prefer-light")
+                time.sleep(0.3)
+                run("gsettings", "set", "org.gnome.desktop.interface", "color-scheme", "prefer-dark")
+                time.sleep(0.3)
+                expect_background(light)
+                print("Verified live system theme changes and manual override", flush=True)
+            click(374, 434)
             click(80, 171)  # Downloads.
             click(1080, 129)  # Pause using the localized control.
             capture("paused-zh")
@@ -92,13 +142,17 @@ def main():
             capture("signed-out")
 
         finally:
-            if app.poll() is None:
-                app.terminate()
-                app.wait(timeout=8)
-            if old_active.get("address"):
-                old_selector = json.dumps("address:" + old_active["address"])
-                dispatch(f"hl.dsp.focus({{window={old_selector}}})")
-            dispatch(f"hl.dsp.cursor.move({{x={old_pointer['x']},y={old_pointer['y']}}})")
+            try:
+                if old_color_scheme is not None:
+                    run("gsettings", "set", "org.gnome.desktop.interface", "color-scheme", old_color_scheme)
+            finally:
+                if app.poll() is None:
+                    app.terminate()
+                    app.wait(timeout=8)
+                if old_active.get("address"):
+                    old_selector = json.dumps("address:" + old_active["address"])
+                    dispatch(f"hl.dsp.focus({{window={old_selector}}})")
+                dispatch(f"hl.dsp.cursor.move({{x={old_pointer['x']},y={old_pointer['y']}}})")
 
 
 if __name__ == "__main__":

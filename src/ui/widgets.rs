@@ -6,31 +6,34 @@ impl AppView {
         title: &'static str,
         content: impl IntoElement,
     ) -> impl IntoElement {
+        let palette = self.palette();
         div()
             .flex()
             .flex_col()
             .gap_3()
             .py_5()
             .border_b_1()
-            .border_color(rgb(0xe1e8e4))
+            .border_color(palette.border)
             .child(
                 div()
                     .h(px(20.))
                     .flex_shrink_0()
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(0x697770))
+                    .text_color(palette.secondary)
                     .child(title),
             )
             .child(content)
     }
 
     pub(super) fn nav_button(
+        &self,
         id: &'static str,
         label: &'static str,
         selected: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
+        let palette = self.palette();
         div()
             .id(id)
             .debug_selector(|| id.to_string())
@@ -39,38 +42,40 @@ impl AppView {
             .py_3()
             .rounded_md()
             .bg(if selected {
-                rgb(0x38564c)
+                palette.nav_selected
             } else {
-                rgb(0x20332e)
+                palette.sidebar
             })
             .text_sm()
             .text_color(if selected {
-                rgb(0xffffff)
+                palette.sidebar_text
             } else {
-                rgb(0xc3cec9)
+                palette.sidebar_muted
             })
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(0x426257)).text_color(rgb(0xffffff)))
+            .hover(move |style| style.bg(palette.nav_hover).text_color(palette.sidebar_text))
             .child(label)
             .on_click(on_click)
     }
 
     pub(super) fn button(
+        &self,
         label: impl Into<SharedString>,
         primary: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
+        let palette = self.palette();
         let label = label.into();
         let debug_label = label.to_string();
         let background = if primary {
-            rgb(0x167d70)
+            palette.accent
         } else {
-            rgb(0xe8eeeb)
+            palette.button
         };
         let foreground = if primary {
-            rgb(0xffffff)
+            palette.on_accent
         } else {
-            rgb(0x273a35)
+            palette.text
         };
         div()
             .id(label.clone())
@@ -86,9 +91,9 @@ impl AppView {
             .cursor_pointer()
             .hover(move |style| {
                 style.bg(if primary {
-                    rgb(0x11685d)
+                    palette.accent_hover
                 } else {
-                    rgb(0xd9e5de)
+                    palette.button_hover
                 })
             })
             .child(label)
@@ -96,11 +101,13 @@ impl AppView {
     }
 
     pub(super) fn segmented(
+        &self,
         id: &'static str,
         label: impl Into<SharedString>,
         selected: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
+        let palette = self.palette();
         div()
             .id(id)
             .debug_selector(|| id.to_string())
@@ -111,20 +118,20 @@ impl AppView {
             .rounded_md()
             .border_1()
             .border_color(if selected {
-                rgb(0x167d70)
+                palette.accent
             } else {
-                rgb(0xd4ddd9)
+                palette.border
             })
             .bg(if selected {
-                rgb(0x167d70)
+                palette.accent
             } else {
-                rgb(0xffffff)
+                palette.surface
             })
             .text_sm()
             .text_color(if selected {
-                rgb(0xffffff)
+                palette.on_accent
             } else {
-                rgb(0x354841)
+                palette.text
             })
             .cursor_pointer()
             .child(label.into())
@@ -132,9 +139,11 @@ impl AppView {
     }
 
     pub(super) fn input_field(
+        &self,
         spec: InputFieldSpec,
         on_mouse_down: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
+        let palette = self.palette();
         let has_value = !spec.value.is_empty();
         let mut shown = if !has_value {
             spec.placeholder.to_string()
@@ -148,9 +157,9 @@ impl AppView {
             shown.insert(byte_index, '|');
         }
         let shown_color = if !has_value {
-            rgb(0x899590)
+            palette.muted
         } else {
-            rgb(0x243631)
+            palette.text
         };
         div()
             .flex()
@@ -173,7 +182,7 @@ impl AppView {
                         .h(px(18.))
                         .flex_shrink_0()
                         .text_xs()
-                        .text_color(rgb(0x67756f))
+                        .text_color(palette.secondary)
                         .child(spec.label),
                 )
             })
@@ -210,11 +219,11 @@ impl AppView {
                     .rounded_md()
                     .border_1()
                     .border_color(if spec.focused {
-                        rgb(0x168576)
+                        palette.focus
                     } else {
-                        rgb(0xd4ddd9)
+                        palette.border
                     })
-                    .bg(rgb(0xffffff))
+                    .bg(palette.input)
                     .text_sm()
                     .overflow_hidden()
                     .text_color(shown_color)

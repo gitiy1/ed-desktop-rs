@@ -1,4 +1,5 @@
 use crate::i18n::LanguagePreference;
+use crate::theme::ThemePreference;
 use directories::{ProjectDirs, UserDirs};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -11,6 +12,7 @@ pub struct AppSettings {
     pub workers: usize,
     pub auto_decrypt: bool,
     pub language: LanguagePreference,
+    pub theme: ThemePreference,
     pub proxy: ProxySettings,
 }
 
@@ -59,6 +61,7 @@ impl Default for AppSettings {
             workers: 4,
             auto_decrypt: true,
             language: LanguagePreference::System,
+            theme: ThemePreference::System,
             proxy: ProxySettings::default(),
         }
     }
@@ -100,7 +103,25 @@ mod tests {
             serde_json::from_str(r#"{"output_directory":"books","workers":4,"auto_decrypt":true}"#)
                 .unwrap();
         assert_eq!(settings.language, LanguagePreference::System);
+        assert_eq!(settings.theme, ThemePreference::System);
         assert_eq!(settings.proxy.mode, ProxyMode::System);
         assert_eq!(settings.proxy.protocol, ProxyProtocol::Http);
+    }
+
+    #[test]
+    fn theme_preference_survives_saved_settings() {
+        for theme in [
+            ThemePreference::System,
+            ThemePreference::Dark,
+            ThemePreference::Light,
+        ] {
+            let settings = AppSettings {
+                theme,
+                ..AppSettings::default()
+            };
+            let json = serde_json::to_string(&settings).unwrap();
+            let restored: AppSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.theme, theme);
+        }
     }
 }

@@ -5,6 +5,7 @@ mod i18n;
 mod lcp;
 mod network;
 mod settings;
+mod theme;
 mod ui;
 
 fn main() {

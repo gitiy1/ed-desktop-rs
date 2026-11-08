@@ -6,6 +6,7 @@ impl AppView {
         cx: &mut Context<Self>,
         downloads_only: bool,
     ) -> impl IntoElement {
+        let palette = self.palette();
         let search = self.search_text.trim().to_lowercase();
         let rows: Vec<_> = self
             .rows
@@ -48,12 +49,12 @@ impl AppView {
                         .px_4()
                         .py_3()
                         .bg(if selected && !downloads_only {
-                            rgb(0xf0f7f3)
+                            palette.selected
                         } else {
-                            rgb(0xffffff)
+                            palette.surface
                         })
                         .border_b_1()
-                        .border_color(rgb(0xe5eae7))
+                        .border_color(palette.border)
                         .child(if downloads_only {
                             div().w(px(28.)).child("").into_any_element()
                         } else {
@@ -68,9 +69,9 @@ impl AppView {
                                 .items_center()
                                 .text_size(px(20.))
                                 .text_color(if selected {
-                                    rgb(0x167d70)
+                                    palette.accent
                                 } else {
-                                    rgb(0x87928d)
+                                    palette.muted
                                 })
                                 .cursor_pointer()
                                 .child(if selected { "☑" } else { "☐" })
@@ -111,7 +112,7 @@ impl AppView {
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(rgb(0x718079))
+                                        .text_color(palette.secondary)
                                         .text_ellipsis()
                                         .child(author),
                                 ),
@@ -130,7 +131,7 @@ impl AppView {
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .text_xs()
-                                            .text_color(rgb(0x607068))
+                                            .text_color(palette.secondary)
                                             .child(status),
                                     )
                                     .child(
@@ -138,16 +139,16 @@ impl AppView {
                                             .w_full()
                                             .h(px(6.))
                                             .rounded_md()
-                                            .bg(rgb(0xe5ebe8))
+                                            .bg(palette.progress_track)
                                             .child(
                                                 div()
                                                     .h_full()
                                                     .w(relative(progress))
                                                     .rounded_md()
                                                     .bg(if row.state == DownloadState::Paused {
-                                                        rgb(0xc29a4b)
+                                                        palette.paused
                                                     } else {
-                                                        rgb(0x168576)
+                                                        palette.focus
                                                     }),
                                             ),
                                     )
@@ -156,7 +157,7 @@ impl AppView {
                                             .flex()
                                             .justify_between()
                                             .text_xs()
-                                            .text_color(rgb(0x718079))
+                                            .text_color(palette.secondary)
                                             .child(progress_text)
                                             .child(speed),
                                     ),
@@ -176,7 +177,7 @@ impl AppView {
                 .flex()
                 .justify_center()
                 .items_center()
-                .text_color(rgb(0x77857f))
+                .text_color(palette.muted)
                 .child(self.text(Text::NoBooks));
         }
         div()
@@ -189,6 +190,7 @@ impl AppView {
     }
 
     pub(super) fn render_login(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.palette();
         div()
             .size_full()
             .flex()
@@ -214,11 +216,11 @@ impl AppView {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(0x6b7973))
+                                    .text_color(palette.secondary)
                                     .child(self.text(Text::LoginSubtitle)),
                             ),
                     )
-                    .child(Self::input_field(
+                    .child(self.input_field(
                         InputFieldSpec {
                             field: FocusedField::Email,
                             label: self.text(Text::Email),
@@ -232,7 +234,7 @@ impl AppView {
                             this.click_field(FocusedField::Email, window, cx)
                         }),
                     ))
-                    .child(Self::input_field(
+                    .child(self.input_field(
                         InputFieldSpec {
                             field: FocusedField::Password,
                             label: self.text(Text::Password),
@@ -246,7 +248,7 @@ impl AppView {
                             this.click_field(FocusedField::Password, window, cx)
                         }),
                     ))
-                    .child(Self::button(
+                    .child(self.button(
                         self.text(Text::SignIn),
                         true,
                         cx.listener(|this, _, _, cx| this.start_login(cx)),
@@ -255,6 +257,7 @@ impl AppView {
     }
 
     pub(super) fn render_library(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.palette();
         if self.session.is_none() {
             return self.render_login(cx).into_any_element();
         }
@@ -266,8 +269,8 @@ impl AppView {
             .flex_col()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0xe0e7e3))
-            .bg(rgb(0xffffff))
+            .border_color(palette.border)
+            .bg(palette.surface)
             .overflow_hidden()
             .child(
                 div()
@@ -276,7 +279,7 @@ impl AppView {
                     .gap_3()
                     .px_5()
                     .py_4()
-                    .child(Self::input_field(
+                    .child(self.input_field(
                         InputFieldSpec {
                             field: FocusedField::Search,
                             label: "",
@@ -290,7 +293,7 @@ impl AppView {
                             this.click_field(FocusedField::Search, window, cx)
                         }),
                     ))
-                    .child(Self::button(
+                    .child(self.button(
                         self.text(Text::Refresh),
                         false,
                         cx.listener(|this, _, _, cx| this.refresh_books(cx)),
@@ -304,14 +307,14 @@ impl AppView {
                     .px_5()
                     .py_3()
                     .border_b_1()
-                    .border_color(rgb(0xe1e8e4))
-                    .bg(rgb(0xf8faf9))
+                    .border_color(palette.border)
+                    .bg(palette.inset)
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(Self::button(
+                            .child(self.button(
                                 if all_selected {
                                     self.text(Text::ClearSelection)
                                 } else {
@@ -321,13 +324,13 @@ impl AppView {
                                 cx.listener(|this, _, _, cx| this.toggle_all(cx)),
                             ))
                             .child(
-                                div().text_xs().text_color(rgb(0x718079)).child(format!(
+                                div().text_xs().text_color(palette.secondary).child(format!(
                                     "{selected} {}",
                                     self.text(Text::SelectedCount)
                                 )),
                             ),
                     )
-                    .child(Self::button(
+                    .child(self.button(
                         format!("{} ({selected})", self.text(Text::DownloadSelected)),
                         true,
                         cx.listener(|this, _, _, cx| this.start_downloads(cx)),
@@ -338,6 +341,7 @@ impl AppView {
     }
 
     pub(super) fn render_downloads(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.palette();
         let control = self.download_control.clone();
         let has_downloads = !self.queued_download_ids.is_empty();
         let paused = control.as_ref().is_some_and(|control| control.is_paused());
@@ -352,8 +356,8 @@ impl AppView {
             .debug_selector(|| "downloads-view".to_string())
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0xe0e7e3))
-            .bg(rgb(0xffffff))
+            .border_color(palette.border)
+            .bg(palette.surface)
             .overflow_hidden()
             .size_full()
             .flex()
@@ -368,28 +372,33 @@ impl AppView {
                     .justify_between()
                     .items_center()
                     .border_b_1()
-                    .border_color(rgb(0xe1e8e4))
+                    .border_color(palette.border)
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
                             .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(if paused {
-                                rgb(0xc29a4b)
+                                palette.paused
                             } else {
-                                rgb(0x168576)
+                                palette.focus
                             }))
-                            .child(div().text_sm().text_color(rgb(0x52645b)).child(queue_label)),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(palette.secondary)
+                                    .child(queue_label),
+                            ),
                     )
                     .child(if self.busy && paused {
-                        Self::button(
+                        self.button(
                             self.text(Text::Resume),
                             true,
                             cx.listener(|this, _, _, cx| this.resume_downloads(cx)),
                         )
                         .into_any_element()
                     } else if self.busy && control.is_some() {
-                        Self::button(
+                        self.button(
                             self.text(Text::Pause),
                             false,
                             cx.listener(|this, _, _, cx| this.pause_downloads(cx)),
@@ -407,13 +416,14 @@ impl AppView {
                     .flex()
                     .justify_center()
                     .items_center()
-                    .text_color(rgb(0x77857f))
+                    .text_color(palette.muted)
                     .child(self.text(Text::NoDownloads))
                     .into_any_element()
             })
     }
 
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.palette();
         div()
             .id("settings-scroll")
             .size_full()
@@ -426,7 +436,7 @@ impl AppView {
                         .flex()
                         .items_end()
                         .gap_3()
-                        .child(Self::input_field(
+                        .child(self.input_field(
                             InputFieldSpec {
                                 field: FocusedField::Output,
                                 label: self.text(Text::SaveTo),
@@ -440,12 +450,12 @@ impl AppView {
                                 this.click_field(FocusedField::Output, window, cx)
                             }),
                         ))
-                        .child(Self::button(
+                        .child(self.button(
                             self.text(Text::Browse),
                             false,
                             cx.listener(|this, _, window, cx| this.choose_folder(window, cx)),
                         ))
-                        .child(Self::input_field(
+                        .child(self.input_field(
                             InputFieldSpec {
                                 field: FocusedField::Workers,
                                 label: self.text(Text::Workers),
@@ -476,14 +486,14 @@ impl AppView {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x687770))
+                                        .text_color(palette.secondary)
                                         .child(self.text(Text::Language)),
                                 )
                                 .child(
                                     div()
                                         .flex()
                                         .gap_2()
-                                        .child(Self::segmented(
+                                        .child(self.segmented(
                                             "language-system",
                                             self.text(Text::FollowSystem),
                                             self.settings.language == LanguagePreference::System,
@@ -491,7 +501,7 @@ impl AppView {
                                                 this.set_language(LanguagePreference::System, cx)
                                             }),
                                         ))
-                                        .child(Self::segmented(
+                                        .child(self.segmented(
                                             "language-english",
                                             self.text(Text::English),
                                             self.settings.language == LanguagePreference::English,
@@ -499,7 +509,7 @@ impl AppView {
                                                 this.set_language(LanguagePreference::English, cx)
                                             }),
                                         ))
-                                        .child(Self::segmented(
+                                        .child(self.segmented(
                                             "language-zh-cn",
                                             self.text(Text::SimplifiedChinese),
                                             self.settings.language
@@ -533,6 +543,36 @@ impl AppView {
             )
             .child(
                 self.settings_section(
+                    self.text(Text::Appearance),
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(self.segmented(
+                            "theme-system",
+                            self.text(Text::FollowSystem),
+                            self.settings.theme == ThemePreference::System,
+                            cx.listener(|this, _, _, cx| {
+                                this.set_theme(ThemePreference::System, cx)
+                            }),
+                        ))
+                        .child(self.segmented(
+                            "theme-dark",
+                            self.text(Text::DarkTheme),
+                            self.settings.theme == ThemePreference::Dark,
+                            cx.listener(|this, _, _, cx| this.set_theme(ThemePreference::Dark, cx)),
+                        ))
+                        .child(self.segmented(
+                            "theme-light",
+                            self.text(Text::LightTheme),
+                            self.settings.theme == ThemePreference::Light,
+                            cx.listener(|this, _, _, cx| {
+                                this.set_theme(ThemePreference::Light, cx)
+                            }),
+                        )),
+                ),
+            )
+            .child(
+                self.settings_section(
                     self.text(Text::Network),
                     div()
                         .flex()
@@ -543,7 +583,7 @@ impl AppView {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .child(Self::segmented(
+                                .child(self.segmented(
                                     "proxy-system",
                                     self.text(Text::SystemProxy),
                                     self.settings.proxy.mode == ProxyMode::System,
@@ -551,7 +591,7 @@ impl AppView {
                                         this.set_proxy_mode(ProxyMode::System, cx)
                                     }),
                                 ))
-                                .child(Self::segmented(
+                                .child(self.segmented(
                                     "proxy-manual",
                                     self.text(Text::ManualProxy),
                                     self.settings.proxy.mode == ProxyMode::Manual,
@@ -563,7 +603,7 @@ impl AppView {
                                     div()
                                         .flex_grow()
                                         .text_xs()
-                                        .text_color(rgb(0x75827c))
+                                        .text_color(palette.muted)
                                         .child(self.text(Text::SystemProxyFallback)),
                                 ),
                         )
@@ -573,7 +613,7 @@ impl AppView {
                                     .flex()
                                     .items_end()
                                     .gap_2()
-                                    .child(Self::segmented(
+                                    .child(self.segmented(
                                         "proxy-http",
                                         self.text(Text::HttpProxy),
                                         self.settings.proxy.protocol == ProxyProtocol::Http,
@@ -581,7 +621,7 @@ impl AppView {
                                             this.set_proxy_protocol(ProxyProtocol::Http, cx)
                                         }),
                                     ))
-                                    .child(Self::segmented(
+                                    .child(self.segmented(
                                         "proxy-socks5",
                                         self.text(Text::Socks5Proxy),
                                         self.settings.proxy.protocol == ProxyProtocol::Socks5,
@@ -589,7 +629,7 @@ impl AppView {
                                             this.set_proxy_protocol(ProxyProtocol::Socks5, cx)
                                         }),
                                     ))
-                                    .child(Self::input_field(
+                                    .child(self.input_field(
                                         InputFieldSpec {
                                             field: FocusedField::ProxyAddress,
                                             label: self.text(Text::ProxyAddress),

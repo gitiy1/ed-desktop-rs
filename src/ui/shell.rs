@@ -3,6 +3,7 @@ use super::*;
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_listener(window, cx);
+        let palette = self.palette();
         let account_label = self
             .session
             .as_ref()
@@ -32,8 +33,8 @@ impl Render for AppView {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event, _, cx| this.handle_key(event, cx)))
             .flex()
-            .bg(rgb(0xf3f6f4))
-            .text_color(rgb(0x253630))
+            .bg(palette.background)
+            .text_color(palette.text)
             .child(
                 div()
                     .id("sidebar")
@@ -44,8 +45,8 @@ impl Render for AppView {
                     .py_5()
                     .flex()
                     .flex_col()
-                    .bg(rgb(0x20332e))
-                    .text_color(rgb(0xf4f7f5))
+                    .bg(palette.sidebar)
+                    .text_color(palette.sidebar_text)
                     .child(
                         div()
                             .px_2()
@@ -55,30 +56,39 @@ impl Render for AppView {
                             .gap_1()
                             .child(
                                 div()
+                                    .h(px(24.))
+                                    .flex_shrink_0()
                                     .text_size(px(19.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("Endao"),
                             )
-                            .child(div().text_xs().text_color(rgb(0xaab9b2)).child("BOOKS")),
+                            .child(
+                                div()
+                                    .h(px(18.))
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .text_color(palette.sidebar_muted)
+                                    .child("BOOKS"),
+                            ),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(Self::nav_button(
+                            .child(self.nav_button(
                                 "nav-library",
                                 self.text(Text::LibraryNav),
                                 self.page == ActivePage::Library,
                                 cx.listener(|this, _, _, cx| this.navigate(NavItem::Library, cx)),
                             ))
-                            .child(Self::nav_button(
+                            .child(self.nav_button(
                                 "nav-downloads",
                                 self.text(Text::DownloadsNav),
                                 self.page == ActivePage::Downloads,
                                 cx.listener(|this, _, _, cx| this.navigate(NavItem::Downloads, cx)),
                             ))
-                            .child(Self::nav_button(
+                            .child(self.nav_button(
                                 "nav-settings",
                                 self.text(Text::SettingsNav),
                                 self.page == ActivePage::Settings,
@@ -91,19 +101,26 @@ impl Render for AppView {
                             .px_2()
                             .py_3()
                             .border_t_1()
-                            .border_color(rgb(0x43564f))
+                            .border_color(palette.sidebar_border)
                             .flex()
                             .flex_col()
                             .gap_2()
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0xaab9b2))
+                                    .text_color(palette.sidebar_muted)
                                     .child(self.text(Text::Account)),
                             )
-                            .child(div().text_sm().text_ellipsis().child(account_label))
+                            .child(
+                                div()
+                                    .h(px(22.))
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .text_ellipsis()
+                                    .child(account_label),
+                            )
                             .children(if self.session.is_some() {
-                                Some(Self::button(
+                                Some(self.button(
                                     self.text(Text::Logout),
                                     false,
                                     cx.listener(|this, _, _, cx| this.logout(cx)),
@@ -127,9 +144,9 @@ impl Render for AppView {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .bg(rgb(0xffffff))
+                            .bg(palette.surface)
                             .border_b_1()
-                            .border_color(rgb(0xe0e7e3))
+                            .border_color(palette.border)
                             .child(
                                 div()
                                     .flex()
@@ -144,7 +161,7 @@ impl Render for AppView {
                                     .child(
                                         div()
                                             .text_sm()
-                                            .text_color(rgb(0x718079))
+                                            .text_color(palette.secondary)
                                             .whitespace_nowrap()
                                             .child(page_subtitle),
                                     ),
@@ -170,10 +187,10 @@ impl Render for AppView {
                             .flex()
                             .items_center()
                             .border_t_1()
-                            .border_color(rgb(0xe1e8e4))
-                            .bg(rgb(0xf8faf9))
+                            .border_color(palette.border)
+                            .bg(palette.inset)
                             .text_xs()
-                            .text_color(rgb(0x687770))
+                            .text_color(palette.secondary)
                             .child(self.status.clone()),
                     ),
             )
