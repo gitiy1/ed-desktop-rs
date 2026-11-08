@@ -1,3 +1,4 @@
+use crate::i18n::LanguagePreference;
 use directories::{ProjectDirs, UserDirs};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -9,6 +10,42 @@ pub struct AppSettings {
     pub output_directory: PathBuf,
     pub workers: usize,
     pub auto_decrypt: bool,
+    pub language: LanguagePreference,
+    pub proxy: ProxySettings,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyMode {
+    #[default]
+    System,
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyProtocol {
+    #[default]
+    Http,
+    Socks5,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxySettings {
+    pub mode: ProxyMode,
+    pub protocol: ProxyProtocol,
+    pub address: String,
+}
+
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self {
+            mode: ProxyMode::System,
+            protocol: ProxyProtocol::Http,
+            address: String::new(),
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -21,6 +58,8 @@ impl Default for AppSettings {
             output_directory,
             workers: 4,
             auto_decrypt: true,
+            language: LanguagePreference::System,
+            proxy: ProxySettings::default(),
         }
     }
 }
@@ -49,4 +88,19 @@ pub fn save(settings: &AppSettings) {
 fn settings_path() -> Option<PathBuf> {
     ProjectDirs::from("com", "Endao", "Endao Desktop")
         .map(|directories| directories.config_dir().join("settings.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_settings_files_default_to_system_language_and_proxy() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"output_directory":"books","workers":4,"auto_decrypt":true}"#)
+                .unwrap();
+        assert_eq!(settings.language, LanguagePreference::System);
+        assert_eq!(settings.proxy.mode, ProxyMode::System);
+        assert_eq!(settings.proxy.protocol, ProxyProtocol::Http);
+    }
 }

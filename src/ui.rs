@@ -1,7 +1,8 @@
 use crate::api::{self, Book, Session};
 use crate::downloader::{self, DownloadProgress};
+use crate::i18n::{self, LanguagePreference, Locale, Text};
 use crate::lcp;
-use crate::settings::{self, AppSettings};
+use crate::settings::{self, AppSettings, ProxyMode, ProxyProtocol};
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
 use gpui::{
@@ -18,6 +19,7 @@ enum FocusedField {
     Password,
     Output,
     Workers,
+    ProxyAddress,
 }
 
 #[derive(Clone)]
@@ -30,12 +32,22 @@ struct BookRow {
     speed: f64,
 }
 
+struct InputFieldSpec {
+    field: FocusedField,
+    label: &'static str,
+    value: String,
+    placeholder: &'static str,
+    focused: bool,
+    cursor: usize,
+    masked: bool,
+}
+
 impl BookRow {
-    fn new(book: Book) -> Self {
+    fn new(book: Book, locale: Locale) -> Self {
         Self {
             book,
             selected: false,
-            status: "Ready".to_string(),
+            status: i18n::text(locale, Text::Ready).to_string(),
             received: 0,
             total: 0,
             speed: 0.0,
@@ -79,6 +91,7 @@ pub struct AppView {
     password: String,
     output_text: String,
     workers_text: String,
+    proxy_address: String,
     settings: AppSettings,
     session: Option<Session>,
     rows: Vec<BookRow>,
@@ -91,21 +104,32 @@ pub struct AppView {
     events_rx: Receiver<UiEvent>,
     listener_started: bool,
     busy: bool,
+    persist_settings: bool,
 }
 
 impl AppView {
+    fn locale(&self) -> Locale {
+        self.settings.language.resolve()
+    }
+
+    fn text(&self, key: Text) -> &'static str {
+        i18n::text(self.locale(), key)
+    }
+
     fn new(cx: &mut Context<Self>) -> Self {
         let settings = settings::load();
+        let status = i18n::text(settings.language.resolve(), Text::SignInPrompt).to_string();
         let (events_tx, events_rx) = async_channel::unbounded();
         Self {
             email: std::env::var("ED_EMAIL").unwrap_or_default(),
             password: std::env::var("ED_PASSWORD").unwrap_or_default(),
             output_text: settings.output_directory.to_string_lossy().into_owned(),
             workers_text: settings.workers.to_string(),
+            proxy_address: settings.proxy.address.clone(),
             settings,
             session: None,
             rows: Vec::new(),
-            status: "Sign in to load your purchased books.".to_string(),
+            status,
             focused_field: FocusedField::Email,
             cursor: std::env::var("ED_EMAIL")
                 .map(|value| value.chars().count())
@@ -116,6 +140,7 @@ impl AppView {
             events_rx,
             listener_started: false,
             busy: false,
+            persist_settings: true,
         }
     }
 
@@ -142,6 +167,7 @@ impl AppView {
     }
 
     fn handle_event(&mut self, event: UiEvent) {
+        let locale = self.locale();
         match event {
             UiEvent::LoginDone(Ok((session, books))) => {
                 self.session = Some(session);
@@ -151,24 +177,24 @@ impl AppView {
                 }
                 self.replace_books(books);
                 self.busy = false;
-                self.status = format!("Signed in. {} purchased books loaded.", self.rows.len());
+                self.status = self.books_loaded_message();
             }
             UiEvent::LoginDone(Err(error)) => {
                 self.busy = false;
-                self.status = format!("Sign in failed: {error:#}");
+                self.status = format!("{}: {error:#}", self.text(Text::SignInFailed));
             }
             UiEvent::BooksDone(Ok(books)) => {
                 self.replace_books(books);
                 self.busy = false;
-                self.status = format!("{} purchased books loaded.", self.rows.len());
+                self.status = self.books_loaded_message();
             }
             UiEvent::BooksDone(Err(error)) => {
                 self.busy = false;
-                self.status = format!("Could not load books: {error:#}");
+                self.status = format!("{}: {error:#}", self.text(Text::RefreshFailed));
             }
             UiEvent::Started { id } => {
                 if let Some(row) = self.row_mut(&id) {
-                    row.status = "Downloading".to_string();
+                    row.status = i18n::text(locale, Text::Downloading).to_string();
                     row.received = 0;
                     row.total = 0;
                     row.speed = 0.0;
@@ -189,12 +215,14 @@ impl AppView {
                 if let Some(row) = self.row_mut(&id) {
                     row.status = if decrypted {
                         format!(
-                            "Ready: {}",
+                            "{}: {}",
+                            i18n::text(locale, Text::DecryptedFile),
                             path.file_name().unwrap_or_default().to_string_lossy()
                         )
                     } else {
                         format!(
-                            "Downloaded: {}",
+                            "{}: {}",
+                            i18n::text(locale, Text::EncryptedFile),
                             path.file_name().unwrap_or_default().to_string_lossy()
                         )
                     };
@@ -204,7 +232,7 @@ impl AppView {
             }
             UiEvent::Failed { id, message } => {
                 if let Some(row) = self.row_mut(&id) {
-                    row.status = format!("Failed: {message}");
+                    row.status = format!("{}: {message}", i18n::text(locale, Text::Failed));
                     row.speed = 0.0;
                 }
             }
@@ -217,7 +245,17 @@ impl AppView {
         self.rows.iter_mut().find(|row| row.book.id() == id)
     }
 
+    fn books_loaded_message(&self) -> String {
+        match self.locale() {
+            Locale::English => format!("{} {}.", self.rows.len(), self.text(Text::BooksLoaded)),
+            Locale::SimplifiedChinese => {
+                format!("{}{}。", self.rows.len(), self.text(Text::BooksLoaded))
+            }
+        }
+    }
+
     fn replace_books(&mut self, books: Vec<Book>) {
+        let locale = self.locale();
         let old: std::collections::HashMap<String, BookRow> = self
             .rows
             .drain(..)
@@ -236,7 +274,7 @@ impl AppView {
                         speed: row.speed,
                     }
                 } else {
-                    BookRow::new(book)
+                    BookRow::new(book, locale)
                 }
             })
             .collect();
@@ -321,7 +359,8 @@ impl AppView {
                     FocusedField::Email => FocusedField::Password,
                     FocusedField::Password => FocusedField::Output,
                     FocusedField::Output => FocusedField::Workers,
-                    FocusedField::Workers => FocusedField::Email,
+                    FocusedField::Workers => FocusedField::ProxyAddress,
+                    FocusedField::ProxyAddress => FocusedField::Email,
                 };
                 self.cursor = self.current_value().chars().count();
                 self.select_all = false;
@@ -354,6 +393,7 @@ impl AppView {
             FocusedField::Password => &self.password,
             FocusedField::Output => &self.output_text,
             FocusedField::Workers => &self.workers_text,
+            FocusedField::ProxyAddress => &self.proxy_address,
         }
     }
 
@@ -363,6 +403,7 @@ impl AppView {
             FocusedField::Password => &mut self.password,
             FocusedField::Output => &mut self.output_text,
             FocusedField::Workers => &mut self.workers_text,
+            FocusedField::ProxyAddress => &mut self.proxy_address,
         }
     }
 
@@ -417,7 +458,34 @@ impl AppView {
         if let Ok(workers) = self.workers_text.parse::<usize>() {
             self.settings.workers = workers.clamp(1, 16);
         }
-        settings::save(&self.settings);
+        self.settings.proxy.address = self.proxy_address.trim().to_string();
+        self.save_settings();
+    }
+
+    fn save_settings(&self) {
+        if self.persist_settings {
+            settings::save(&self.settings);
+        }
+    }
+
+    fn set_language(&mut self, language: LanguagePreference, cx: &mut Context<Self>) {
+        self.settings.language = language;
+        self.save_settings();
+        cx.notify();
+    }
+
+    fn set_proxy_mode(&mut self, mode: ProxyMode, cx: &mut Context<Self>) {
+        self.settings.proxy.mode = mode;
+        self.sync_settings();
+        self.status = self.text(Text::ProxySettingSaved).to_string();
+        cx.notify();
+    }
+
+    fn set_proxy_protocol(&mut self, protocol: ProxyProtocol, cx: &mut Context<Self>) {
+        self.settings.proxy.protocol = protocol;
+        self.sync_settings();
+        self.status = self.text(Text::ProxySettingSaved).to_string();
+        cx.notify();
     }
 
     fn start_login(&mut self, cx: &mut Context<Self>) {
@@ -426,22 +494,30 @@ impl AppView {
         }
         self.sync_settings();
         self.busy = true;
-        self.status = "Signing in and loading your bookshelf…".to_string();
+        if self.email.trim().is_empty() || self.password.is_empty() {
+            self.busy = false;
+            self.status = self.text(Text::EmptyCredentials).to_string();
+            cx.notify();
+            return;
+        }
+        self.status = self.text(Text::SigningIn).to_string();
         let email = self.email.clone();
         let password = self.password.clone();
+        let proxy = self.settings.proxy.clone();
         let sender = self.events_tx.clone();
         cx.notify();
         thread::spawn(move || {
-            let version = api::latest_version();
-            let result = api::login(&email, &password, version)
-                .and_then(|session| api::purchased_books(&session).map(|books| (session, books)));
+            let version = api::latest_version(&proxy);
+            let result = api::login(&email, &password, version, &proxy).and_then(|session| {
+                api::purchased_books(&session, &proxy).map(|books| (session, books))
+            });
             let _ = sender.send_blocking(UiEvent::LoginDone(result));
         });
     }
 
     fn refresh_books(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
-            self.status = "Sign in before refreshing the bookshelf.".to_string();
+            self.status = self.text(Text::RefreshPrompt).to_string();
             cx.notify();
             return;
         };
@@ -449,11 +525,13 @@ impl AppView {
             return;
         }
         self.busy = true;
-        self.status = "Refreshing purchased books…".to_string();
+        self.status = self.text(Text::Refreshing).to_string();
+        let proxy = self.settings.proxy.clone();
         let sender = self.events_tx.clone();
         cx.notify();
         thread::spawn(move || {
-            let _ = sender.send_blocking(UiEvent::BooksDone(api::purchased_books(&session)));
+            let _ =
+                sender.send_blocking(UiEvent::BooksDone(api::purchased_books(&session, &proxy)));
         });
     }
 
@@ -474,13 +552,13 @@ impl AppView {
 
     fn toggle_decrypt(&mut self, cx: &mut Context<Self>) {
         self.settings.auto_decrypt = !self.settings.auto_decrypt;
-        settings::save(&self.settings);
+        self.save_settings();
         cx.notify();
     }
 
     fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let folder = rfd::FileDialog::new()
-            .set_title("Choose download folder")
+            .set_title(self.text(Text::SaveTo))
             .set_directory(&self.settings.output_directory)
             .pick_folder();
         if let Some(folder) = folder {
@@ -496,28 +574,29 @@ impl AppView {
 
     fn start_downloads(&mut self, cx: &mut Context<Self>) {
         if self.busy {
-            self.status = "Wait for the current download queue to finish.".to_string();
+            self.status = self.text(Text::QueueRunning).to_string();
             cx.notify();
             return;
         }
         let Some(session) = self.session.clone() else {
-            self.status = "Sign in before downloading books.".to_string();
+            self.status = self.text(Text::SignInPrompt).to_string();
             cx.notify();
             return;
         };
+        let locale = self.locale();
         let books: Vec<Book> = self
             .rows
             .iter_mut()
-            .filter(|row| row.selected && !row.status.starts_with("Downloading"))
+            .filter(|row| row.selected && row.status != i18n::text(locale, Text::Downloading))
             .map(|row| {
-                row.status = "Queued".to_string();
+                row.status = i18n::text(locale, Text::Queued).to_string();
                 row.received = 0;
                 row.total = 0;
                 row.book.clone()
             })
             .collect();
         if books.is_empty() {
-            self.status = "Select at least one book.".to_string();
+            self.status = self.text(Text::SelectBooks).to_string();
             cx.notify();
             return;
         }
@@ -525,12 +604,15 @@ impl AppView {
         let output = self.settings.output_directory.clone();
         let workers = self.settings.workers;
         let auto_decrypt = self.settings.auto_decrypt;
+        let proxy = self.settings.proxy.clone();
         let sender = self.events_tx.clone();
         self.busy = true;
-        self.status = format!(
-            "Queued {} books with {workers} download workers.",
-            books.len()
-        );
+        self.status = match locale {
+            Locale::English => format!("Queued {} books · {workers} workers", books.len()),
+            Locale::SimplifiedChinese => {
+                format!("{} 本书已加入队列 · {workers} 个线程", books.len())
+            }
+        };
         cx.notify();
         thread::spawn(move || {
             for book in books {
@@ -551,6 +633,7 @@ impl AppView {
                     &book,
                     &raw_path,
                     workers,
+                    &proxy,
                     move |progress| {
                         let _ = progress_sender.send_blocking(UiEvent::Progress {
                             id: progress_id.clone(),
@@ -573,7 +656,10 @@ impl AppView {
                             Err(error) => {
                                 let _ = sender.send_blocking(UiEvent::Failed {
                                     id,
-                                    message: format!("downloaded; export failed: {error:#}"),
+                                    message: format!(
+                                        "{}: {error:#}",
+                                        i18n::text(locale, Text::Downloaded)
+                                    ),
                                 });
                             }
                         }
@@ -594,7 +680,9 @@ impl AppView {
                 }
             }
             let _ = sender.send_blocking(UiEvent::QueueDone);
-            let _ = sender.send_blocking(UiEvent::Message("Download queue finished.".to_string()));
+            let _ = sender.send_blocking(UiEvent::Message(
+                i18n::text(locale, Text::QueueFinished).to_string(),
+            ));
         });
     }
 
@@ -604,6 +692,7 @@ impl AppView {
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         let label = label.into();
+        let debug_label = label.to_string();
         let background = if primary {
             rgb(0x167d70)
         } else {
@@ -616,6 +705,7 @@ impl AppView {
         };
         div()
             .id(label.clone())
+            .debug_selector(move || debug_label.clone())
             .px_4()
             .py_2()
             .rounded_md()
@@ -627,27 +717,58 @@ impl AppView {
             .on_click(on_click)
     }
 
+    fn segmented(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        selected: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .debug_selector(|| id.to_string())
+            .h(px(34.))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(if selected {
+                rgb(0x167d70)
+            } else {
+                rgb(0xd4ddd9)
+            })
+            .bg(if selected {
+                rgb(0x167d70)
+            } else {
+                rgb(0xffffff)
+            })
+            .text_sm()
+            .text_color(if selected {
+                rgb(0xffffff)
+            } else {
+                rgb(0x354841)
+            })
+            .cursor_pointer()
+            .child(label.into())
+            .on_click(on_click)
+    }
+
     fn input_field(
-        label: &'static str,
-        value: String,
-        placeholder: &'static str,
-        focused: bool,
-        cursor: usize,
-        masked: bool,
+        spec: InputFieldSpec,
         on_mouse_down: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
-        let mut shown = if masked {
-            "•".repeat(value.chars().count())
-        } else if value.is_empty() {
-            placeholder.to_string()
+        let mut shown = if spec.masked {
+            "•".repeat(spec.value.chars().count())
+        } else if spec.value.is_empty() {
+            spec.placeholder.to_string()
         } else {
-            value
+            spec.value
         };
-        if focused && shown != placeholder {
-            let byte_index = char_to_byte_index(&shown, cursor);
+        if spec.focused && shown != spec.placeholder {
+            let byte_index = char_to_byte_index(&shown, spec.cursor);
             shown.insert(byte_index, '|');
         }
-        let shown_color = if shown == placeholder {
+        let shown_color = if shown == spec.placeholder {
             rgb(0x899590)
         } else {
             rgb(0x243631)
@@ -656,26 +777,44 @@ impl AppView {
             .flex()
             .flex_col()
             .flex_grow()
+            .min_w(if spec.field == FocusedField::ProxyAddress {
+                px(220.)
+            } else {
+                px(100.)
+            })
             .gap_1()
-            .child(div().text_xs().text_color(rgb(0x67756f)).child(label))
+            .child(div().text_xs().text_color(rgb(0x67756f)).child(spec.label))
             .child(
                 div()
                     .id((
                         "field",
-                        match label {
-                            "EMAIL" => 0usize,
-                            "PASSWORD" => 1,
-                            "SAVE TO" => 2,
-                            _ => 3,
+                        match spec.field {
+                            FocusedField::Email => 0usize,
+                            FocusedField::Password => 1,
+                            FocusedField::Output => 2,
+                            FocusedField::Workers => 3,
+                            FocusedField::ProxyAddress => 4,
                         },
                     ))
+                    .debug_selector(|| {
+                        format!(
+                            "field-{}",
+                            match spec.field {
+                                FocusedField::Email => 0,
+                                FocusedField::Password => 1,
+                                FocusedField::Output => 2,
+                                FocusedField::Workers => 3,
+                                FocusedField::ProxyAddress => 4,
+                            }
+                        )
+                    })
                     .h(px(38.))
                     .px_3()
                     .flex()
                     .items_center()
                     .rounded_md()
                     .border_1()
-                    .border_color(if focused {
+                    .border_color(if spec.focused {
                         rgb(0x168576)
                     } else {
                         rgb(0xd4ddd9)
@@ -692,6 +831,8 @@ impl AppView {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_listener(window, cx);
+        let locale = self.locale();
+        let text = |key| i18n::text(locale, key);
         let selected_count = self.rows.iter().filter(|row| row.selected).count();
         let all_selected = !self.rows.is_empty() && self.rows.iter().all(|row| row.selected);
         let rows = self.rows.iter().enumerate().map(|(row_index, row)| {
@@ -726,6 +867,7 @@ impl Render for AppView {
                 .child(
                     div()
                         .id(("select", row_index))
+                        .debug_selector(move || format!("select-{row_index}"))
                         .w(px(28.))
                         .text_color(if selected {
                             rgb(0x167d70)
@@ -785,6 +927,8 @@ impl Render for AppView {
         });
 
         div()
+            .id("app-root")
+            .debug_selector(|| "app-root".to_string())
             .size_full()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event, _, cx| this.handle_key(event, cx)))
@@ -819,14 +963,14 @@ impl Render for AppView {
                                 div()
                                     .text_sm()
                                     .text_color(rgb(0x718079))
-                                    .child("Purchased library downloader"),
+                                    .child(text(Text::AppSubtitle)),
                             ),
                     )
                     .child(div().text_sm().text_color(rgb(0x607068)).child(
                         if self.session.is_some() {
-                            "Signed in"
+                            text(Text::SignedIn)
                         } else {
-                            "Not signed in"
+                            text(Text::NotSignedIn)
                         },
                     )),
             )
@@ -838,29 +982,35 @@ impl Render for AppView {
                     .items_end()
                     .gap_3()
                     .child(Self::input_field(
-                        "EMAIL",
-                        self.email.clone(),
-                        "account email",
-                        self.focused_field == FocusedField::Email,
-                        self.cursor,
-                        false,
+                        InputFieldSpec {
+                            field: FocusedField::Email,
+                            label: text(Text::Email),
+                            value: self.email.clone(),
+                            placeholder: text(Text::EmailPlaceholder),
+                            focused: self.focused_field == FocusedField::Email,
+                            cursor: self.cursor,
+                            masked: false,
+                        },
                         cx.listener(|this, _, window, cx| {
                             this.click_field(FocusedField::Email, window, cx)
                         }),
                     ))
                     .child(Self::input_field(
-                        "PASSWORD",
-                        self.password.clone(),
-                        "password",
-                        self.focused_field == FocusedField::Password,
-                        self.cursor,
-                        true,
+                        InputFieldSpec {
+                            field: FocusedField::Password,
+                            label: text(Text::Password),
+                            value: self.password.clone(),
+                            placeholder: text(Text::PasswordPlaceholder),
+                            focused: self.focused_field == FocusedField::Password,
+                            cursor: self.cursor,
+                            masked: true,
+                        },
                         cx.listener(|this, _, window, cx| {
                             this.click_field(FocusedField::Password, window, cx)
                         }),
                     ))
                     .child(Self::button(
-                        "Sign in",
+                        text(Text::SignIn),
                         true,
                         cx.listener(|this, _, _, cx| this.start_login(cx)),
                     )),
@@ -879,29 +1029,35 @@ impl Render for AppView {
                             .items_end()
                             .gap_2()
                             .child(Self::input_field(
-                                "SAVE TO",
-                                self.output_text.clone(),
-                                "Choose a folder",
-                                self.focused_field == FocusedField::Output,
-                                self.cursor,
-                                false,
+                                InputFieldSpec {
+                                    field: FocusedField::Output,
+                                    label: text(Text::SaveTo),
+                                    value: self.output_text.clone(),
+                                    placeholder: text(Text::FolderPlaceholder),
+                                    focused: self.focused_field == FocusedField::Output,
+                                    cursor: self.cursor,
+                                    masked: false,
+                                },
                                 cx.listener(|this, _, window, cx| {
                                     this.click_field(FocusedField::Output, window, cx)
                                 }),
                             ))
                             .child(Self::button(
-                                "Browse…",
+                                text(Text::Browse),
                                 false,
                                 cx.listener(|this, _, window, cx| this.choose_folder(window, cx)),
                             )),
                     )
                     .child(Self::input_field(
-                        "WORKERS",
-                        self.workers_text.clone(),
-                        "4",
-                        self.focused_field == FocusedField::Workers,
-                        self.cursor,
-                        false,
+                        InputFieldSpec {
+                            field: FocusedField::Workers,
+                            label: text(Text::Workers),
+                            value: self.workers_text.clone(),
+                            placeholder: "4",
+                            focused: self.focused_field == FocusedField::Workers,
+                            cursor: self.cursor,
+                            masked: false,
+                        },
                         cx.listener(|this, _, window, cx| {
                             this.click_field(FocusedField::Workers, window, cx)
                         }),
@@ -917,12 +1073,145 @@ impl Render for AppView {
                             .text_color(rgb(0x334840))
                             .cursor_pointer()
                             .child(if self.settings.auto_decrypt {
-                                "☑ Export decrypted EPUB"
+                                format!("☑ {}", text(Text::AutoDecrypt))
                             } else {
-                                "☐ Export decrypted EPUB"
+                                format!("☐ {}", text(Text::AutoDecrypt))
                             })
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_decrypt(cx))),
                     ),
+            )
+            .child(
+                div()
+                    .px_7()
+                    .pb_3()
+                    .flex()
+                    .items_end()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x67756f))
+                                    .child(text(Text::Language)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1()
+                                    .child(Self::segmented(
+                                        "language-system",
+                                        text(Text::FollowSystem),
+                                        self.settings.language == LanguagePreference::System,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.set_language(LanguagePreference::System, cx)
+                                        }),
+                                    ))
+                                    .child(Self::segmented(
+                                        "language-english",
+                                        text(Text::English),
+                                        self.settings.language == LanguagePreference::English,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.set_language(LanguagePreference::English, cx)
+                                        }),
+                                    ))
+                                    .child(Self::segmented(
+                                        "language-zh-cn",
+                                        text(Text::SimplifiedChinese),
+                                        self.settings.language
+                                            == LanguagePreference::SimplifiedChinese,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.set_language(
+                                                LanguagePreference::SimplifiedChinese,
+                                                cx,
+                                            )
+                                        }),
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x67756f))
+                                    .child(text(Text::Proxy)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1()
+                                    .child(Self::segmented(
+                                        "proxy-system",
+                                        text(Text::SystemProxy),
+                                        self.settings.proxy.mode == ProxyMode::System,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.set_proxy_mode(ProxyMode::System, cx)
+                                        }),
+                                    ))
+                                    .child(Self::segmented(
+                                        "proxy-manual",
+                                        text(Text::ManualProxy),
+                                        self.settings.proxy.mode == ProxyMode::Manual,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.set_proxy_mode(ProxyMode::Manual, cx)
+                                        }),
+                                    )),
+                            ),
+                    )
+                    .children(if self.settings.proxy.mode == ProxyMode::Manual {
+                        Some(
+                            div()
+                                .flex()
+                                .items_end()
+                                .gap_1()
+                                .child(Self::segmented(
+                                    "proxy-http",
+                                    text(Text::HttpProxy),
+                                    self.settings.proxy.protocol == ProxyProtocol::Http,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.set_proxy_protocol(ProxyProtocol::Http, cx)
+                                    }),
+                                ))
+                                .child(Self::segmented(
+                                    "proxy-socks5",
+                                    text(Text::Socks5Proxy),
+                                    self.settings.proxy.protocol == ProxyProtocol::Socks5,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.set_proxy_protocol(ProxyProtocol::Socks5, cx)
+                                    }),
+                                ))
+                                .child(Self::input_field(
+                                    InputFieldSpec {
+                                        field: FocusedField::ProxyAddress,
+                                        label: text(Text::ProxyAddress),
+                                        value: self.proxy_address.clone(),
+                                        placeholder: text(Text::ProxyAddressPlaceholder),
+                                        focused: self.focused_field == FocusedField::ProxyAddress,
+                                        cursor: self.cursor,
+                                        masked: false,
+                                    },
+                                    cx.listener(|this, _, window, cx| {
+                                        this.click_field(FocusedField::ProxyAddress, window, cx)
+                                    }),
+                                )),
+                        )
+                    } else {
+                        Some(
+                            div()
+                                .flex_grow()
+                                .pb_2()
+                                .text_xs()
+                                .text_color(rgb(0x718079))
+                                .child(text(Text::SystemProxyFallback)),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -936,7 +1225,7 @@ impl Render for AppView {
                         div()
                             .text_sm()
                             .text_color(rgb(0x56675f))
-                            .child("PURCHASED BOOKS"),
+                            .child(text(Text::PurchasedBooks)),
                     )
                     .child(
                         div()
@@ -944,21 +1233,21 @@ impl Render for AppView {
                             .items_center()
                             .gap_2()
                             .child(Self::button(
-                                "Refresh",
+                                text(Text::Refresh),
                                 false,
                                 cx.listener(|this, _, _, cx| this.refresh_books(cx)),
                             ))
                             .child(Self::button(
                                 if all_selected {
-                                    "Clear selection"
+                                    text(Text::ClearSelection)
                                 } else {
-                                    "Select all"
+                                    text(Text::SelectAll)
                                 },
                                 false,
                                 cx.listener(|this, _, _, cx| this.toggle_all(cx)),
                             ))
                             .child(Self::button(
-                                format!("Download selected ({selected_count})"),
+                                format!("{} ({selected_count})", text(Text::DownloadSelected)),
                                 true,
                                 cx.listener(|this, _, _, cx| this.start_downloads(cx)),
                             )),
@@ -967,6 +1256,7 @@ impl Render for AppView {
             .child(
                 div()
                     .id("book-list")
+                    .debug_selector(|| "book-list".to_string())
                     .mx_7()
                     .mt_3()
                     .flex_grow()
@@ -980,6 +1270,8 @@ impl Render for AppView {
             )
             .child(
                 div()
+                    .id("status-line")
+                    .debug_selector(|| "status-line".to_string())
                     .px_7()
                     .py_3()
                     .text_sm()
@@ -1050,4 +1342,110 @@ fn char_to_byte_index(value: &str, character_index: usize) -> usize {
         .nth(character_index)
         .map(|(byte_index, _)| byte_index)
         .unwrap_or(value.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use serde_json::json;
+
+    fn fixture_book(id: u64, title: &str) -> Book {
+        Book {
+            raw: json!({ "bookId": id, "name": title, "author": "Test Author" }),
+        }
+    }
+
+    #[gpui::test]
+    fn settings_and_bookshelf_support_mouse_and_keyboard_interaction(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| AppView::new(cx));
+        cx.simulate_resize(gpui::size(px(1180.), px(820.)));
+        view.update(cx, |view, _| {
+            view.persist_settings = false;
+            view.email.clear();
+            view.password.clear();
+            view.rows = vec![
+                BookRow::new(fixture_book(1, "Book One"), Locale::English),
+                BookRow::new(fixture_book(2, "Book Two"), Locale::English),
+            ];
+        });
+        cx.refresh().unwrap();
+
+        let email_bounds = cx.debug_bounds("field-0").expect("email field rendered");
+        cx.simulate_click(email_bounds.center(), gpui::Modifiers::none());
+        cx.simulate_input("reader@example.com");
+        view.update(cx, |view, _| assert_eq!(view.email, "reader@example.com"));
+
+        let language_bounds = cx
+            .debug_bounds("language-zh-cn")
+            .expect("Simplified Chinese option rendered");
+        cx.simulate_click(language_bounds.center(), gpui::Modifiers::none());
+        view.update(cx, |view, _| {
+            assert_eq!(
+                view.settings.language,
+                LanguagePreference::SimplifiedChinese
+            );
+            assert_eq!(view.text(Text::SignIn), "登录");
+        });
+        cx.refresh().unwrap();
+
+        let proxy_mode_bounds = cx
+            .debug_bounds("proxy-manual")
+            .expect("manual proxy option rendered");
+        cx.simulate_click(proxy_mode_bounds.center(), gpui::Modifiers::none());
+        view.update(cx, |view, _| {
+            assert_eq!(view.settings.proxy.mode, ProxyMode::Manual)
+        });
+        cx.refresh().unwrap();
+
+        let address_bounds = cx
+            .debug_bounds("field-4")
+            .expect("manual proxy address field rendered");
+        cx.simulate_click(address_bounds.center(), gpui::Modifiers::none());
+        cx.simulate_input("127.0.0.1:1080");
+        view.update(cx, |view, _| {
+            assert_eq!(view.proxy_address, "127.0.0.1:1080");
+            assert_eq!(view.settings.proxy.address, "127.0.0.1:1080");
+        });
+
+        let select_all_bounds = cx.debug_bounds("全选").expect("select all action rendered");
+        cx.simulate_click(select_all_bounds.center(), gpui::Modifiers::none());
+        view.update(cx, |view, _| {
+            assert!(view.rows.iter().all(|row| row.selected))
+        });
+        cx.refresh().unwrap();
+        let first_checkbox = cx
+            .debug_bounds("select-0")
+            .expect("first book checkbox rendered");
+        cx.simulate_click(first_checkbox.center(), gpui::Modifiers::none());
+        view.update(cx, |view, _| {
+            assert!(!view.rows[0].selected);
+            assert!(view.rows[1].selected);
+        });
+
+        let address_bounds = cx
+            .debug_bounds("field-4")
+            .expect("proxy address remains visible");
+        let app_bounds = cx
+            .debug_bounds("app-root")
+            .expect("root view bounds rendered");
+        assert!(address_bounds.origin.x >= app_bounds.origin.x);
+        assert!(
+            address_bounds.origin.x + address_bounds.size.width
+                <= app_bounds.origin.x + app_bounds.size.width
+        );
+        assert!(
+            address_bounds.size.width >= px(160.),
+            "proxy field width was {:?} in root bounds {:?}",
+            address_bounds.size.width,
+            app_bounds.size
+        );
+        let list_bounds = cx.debug_bounds("book-list").expect("bookshelf rendered");
+        let status_bounds = cx.debug_bounds("status-line").expect("status rendered");
+        assert!(list_bounds.origin.y >= address_bounds.origin.y + address_bounds.size.height);
+        assert!(
+            status_bounds.origin.y + status_bounds.size.height
+                <= app_bounds.origin.y + app_bounds.size.height
+        );
+    }
 }

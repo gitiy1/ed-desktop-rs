@@ -1,3 +1,5 @@
+use crate::network;
+use crate::settings::ProxySettings;
 use anyhow::{Context, Result, anyhow};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
@@ -61,22 +63,8 @@ fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
-pub fn http_client() -> Result<Client> {
-    Client::builder()
-        .timeout(Duration::from_secs(90))
-        .connect_timeout(Duration::from_secs(20))
-        .user_agent("okhttp/4.12.0")
-        .build()
-        .context("create HTTP client")
-}
-
-pub fn latest_version() -> String {
-    let client = match Client::builder()
-        .timeout(Duration::from_secs(8))
-        .connect_timeout(Duration::from_secs(5))
-        .user_agent("okhttp/4.12.0")
-        .build()
-    {
+pub fn latest_version(proxy: &ProxySettings) -> String {
+    let client = match network::http_client(Duration::from_secs(8), "okhttp/4.12.0", proxy) {
         Ok(client) => client,
         Err(_) => return DEFAULT_VERSION.to_string(),
     };
@@ -163,13 +151,18 @@ fn parse_payload(response: Response, endpoint: &str) -> Result<Value> {
     Ok(payload)
 }
 
-pub fn login(email: &str, password: &str, version: String) -> Result<Session> {
+pub fn login(
+    email: &str,
+    password: &str,
+    version: String,
+    proxy: &ProxySettings,
+) -> Result<Session> {
     let email = email.trim().to_lowercase();
     if email.is_empty() || password.is_empty() {
         return Err(anyhow!("Enter both email and password."));
     }
     let device_id = Uuid::new_v4().simple().to_string();
-    let client = http_client()?;
+    let client = network::http_client(Duration::from_secs(90), "okhttp/4.12.0", proxy)?;
     let mut bases = vec![DEFAULT_API_BASE.to_string()];
     bases.extend(API_FALLBACKS.iter().map(|base| base.to_string()));
     let mut errors = Vec::new();
@@ -249,8 +242,8 @@ fn post_json(client: &Client, session: &Session, endpoint: &str, body: Value) ->
     parse_payload(response, endpoint)
 }
 
-pub fn purchased_books(session: &Session) -> Result<Vec<Book>> {
-    let client = http_client()?;
+pub fn purchased_books(session: &Session, proxy: &ProxySettings) -> Result<Vec<Book>> {
+    let client = network::http_client(Duration::from_secs(90), "okhttp/4.12.0", proxy)?;
     let mut books = Vec::new();
     let mut page = 1;
     loop {

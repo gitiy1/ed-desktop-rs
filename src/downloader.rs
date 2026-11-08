@@ -1,4 +1,6 @@
-use crate::api::{Book, Session, http_client, old_download_request};
+use crate::api::{Book, Session, old_download_request};
+use crate::network;
+use crate::settings::ProxySettings;
 use anyhow::{Context, Result, anyhow};
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_RANGE, RANGE};
@@ -36,7 +38,7 @@ struct RangeJob {
 
 struct Reporter {
     received: AtomicU64,
-    total: u64,
+    total: AtomicU64,
     started: Instant,
     last_sent: Mutex<Instant>,
     callback: ProgressCallback,
@@ -46,7 +48,7 @@ impl Reporter {
     fn new(initial: u64, total: u64, callback: ProgressCallback) -> Self {
         Self {
             received: AtomicU64::new(initial),
-            total,
+            total: AtomicU64::new(total),
             started: Instant::now(),
             last_sent: Mutex::new(Instant::now() - Duration::from_secs(1)),
             callback,
@@ -56,11 +58,12 @@ impl Reporter {
     fn add(&self, amount: u64) {
         let received = self.received.fetch_add(amount, Ordering::Relaxed) + amount;
         let mut last_sent = self.last_sent.lock().expect("progress timestamp poisoned");
-        if last_sent.elapsed() >= Duration::from_millis(120) || received >= self.total {
+        let total = self.total.load(Ordering::Relaxed);
+        if last_sent.elapsed() >= Duration::from_millis(120) || received >= total {
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             (self.callback)(DownloadProgress {
                 received,
-                total: self.total,
+                total,
                 bytes_per_second: received as f64 / elapsed,
             });
             *last_sent = Instant::now();
@@ -73,6 +76,7 @@ pub fn download_legacy(
     book: &Book,
     destination: &Path,
     workers: usize,
+    proxy: &ProxySettings,
     callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
 ) -> Result<PathBuf> {
     if book.id() == "?" {
@@ -81,7 +85,7 @@ pub fn download_legacy(
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let client = http_client()?;
+    let client = network::http_client(Duration::from_secs(90), "okhttp/4.12.0", proxy)?;
     let callback: ProgressCallback = Arc::new(callback);
     let partial = append_suffix(destination, ".part");
 
@@ -301,7 +305,7 @@ fn download_ranged(
     )
     .context("write range map")?;
 
-    let jobs: Vec<RangeJob> = ranges
+    let mut jobs: Vec<RangeJob> = ranges
         .into_iter()
         .enumerate()
         .map(|(index, (start, end))| RangeJob {
@@ -362,6 +366,24 @@ fn download_ranged(
         return Err(anyhow!("Parallel range download failed: {problem}"));
     }
 
+    let mut covered_total = total;
+    let mut actual_total = reporter.total.load(Ordering::Acquire);
+    while actual_total > covered_total {
+        let tail = RangeJob {
+            start: covered_total,
+            end: actual_total - 1,
+            path: parts_dir.join(format!(
+                "{:05}-{covered_total}-{}.part",
+                jobs.len(),
+                actual_total - 1
+            )),
+        };
+        fetch_range(client, session, book, &tail, &reporter)?;
+        jobs.push(tail);
+        covered_total = actual_total;
+        actual_total = reporter.total.load(Ordering::Acquire);
+    }
+
     let partial = append_suffix(destination, ".part");
     let mut output = BufWriter::new(File::create(&partial).context("create merged EPUB")?);
     for job in &jobs {
@@ -381,6 +403,16 @@ fn download_ranged(
     }
     output.flush().context("flush merged EPUB")?;
     output.get_ref().sync_all().context("sync merged EPUB")?;
+    let merged_size = output
+        .get_ref()
+        .metadata()
+        .context("inspect merged EPUB")?
+        .len();
+    if merged_size != actual_total {
+        return Err(anyhow!(
+            "Merged file has {merged_size} bytes, expected {actual_total}. Range parts have been retained for resume."
+        ));
+    }
     replace_file(&partial, destination)?;
     let _ = fs::remove_dir_all(&parts_dir);
     Ok(destination.to_path_buf())
@@ -422,13 +454,13 @@ fn fetch_range(
             "Range response did not include a valid Content-Range."
         ));
     };
-    if range_start != start || range_end != job.end || server_total != reporter.total {
+    if range_start != start || range_end != job.end || server_total <= range_end {
         return Err(anyhow!(
-            "server returned bytes {range_start}-{range_end}/{server_total}, expected {start}-{} / {}",
-            job.end,
-            reporter.total
+            "server returned bytes {range_start}-{range_end}/{server_total}, expected {start}-{}",
+            job.end
         ));
     }
+    reporter.total.fetch_max(server_total, Ordering::AcqRel);
     let mut output = OpenOptions::new()
         .create(true)
         .append(true)
@@ -525,6 +557,7 @@ mod tests {
         listener: TcpListener,
         content: Vec<u8>,
         request_count: usize,
+        probe_total: Option<usize>,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             for _ in 0..request_count {
@@ -547,9 +580,14 @@ mod tests {
                     None => (0, content.len() - 1),
                 };
                 let body = &content[start..=end];
+                let advertised_total = if range.as_deref() == Some("bytes=0-0") {
+                    probe_total.unwrap_or(content.len())
+                } else {
+                    content.len()
+                };
                 let response = format!(
                     "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    content.len(),
+                    advertised_total,
                     body.len()
                 );
                 stream.write_all(response.as_bytes()).unwrap();
@@ -624,11 +662,19 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let content: Vec<u8> = (0..512 * 1024).map(|index| (index % 251) as u8).collect();
-        let server = start_range_server(listener, content.clone(), 4);
+        let server = start_range_server(listener, content.clone(), 4, None);
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("parallel.epub");
         let session = make_session(format!("http://{address}/api/v4/"));
-        let downloaded = download_legacy(&session, &test_book(), &output, 3, |_| {}).unwrap();
+        let downloaded = download_legacy(
+            &session,
+            &test_book(),
+            &output,
+            3,
+            &ProxySettings::default(),
+            |_| {},
+        )
+        .unwrap();
         server.join().unwrap();
         assert_eq!(fs::read(downloaded).unwrap(), content);
         assert!(!append_suffix(&output, ".parts").exists());
@@ -639,16 +685,46 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let content: Vec<u8> = (0..128 * 1024).map(|index| (index % 239) as u8).collect();
-        let server = start_range_server(listener, content.clone(), 1);
+        let server = start_range_server(listener, content.clone(), 1, None);
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("resume.epub");
         let partial = append_suffix(&output, ".part");
         let completed = 8192;
         fs::write(&partial, &content[..completed]).unwrap();
         let session = make_session(format!("http://{address}/api/v4/"));
-        let downloaded = download_legacy(&session, &test_book(), &output, 1, |_| {}).unwrap();
+        let downloaded = download_legacy(
+            &session,
+            &test_book(),
+            &output,
+            1,
+            &ProxySettings::default(),
+            |_| {},
+        )
+        .unwrap();
         server.join().unwrap();
         assert_eq!(fs::read(downloaded).unwrap(), content);
         assert!(!partial.exists());
+    }
+
+    #[test]
+    fn parallel_download_recovers_a_stale_probe_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let content: Vec<u8> = (0..512 * 1024).map(|index| (index % 223) as u8).collect();
+        let server = start_range_server(listener, content.clone(), 5, Some(content.len() - 3));
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("variable-size.epub");
+        let session = make_session(format!("http://{address}/api/v4/"));
+        let downloaded = download_legacy(
+            &session,
+            &test_book(),
+            &output,
+            3,
+            &ProxySettings::default(),
+            |_| {},
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(fs::read(downloaded).unwrap(), content);
     }
 }

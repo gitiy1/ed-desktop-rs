@@ -1,6 +1,8 @@
 mod api;
 mod downloader;
+mod i18n;
 mod lcp;
+mod network;
 mod settings;
 mod ui;
 
@@ -26,14 +28,15 @@ mod live_tests {
         }
         let email = std::env::var("ED_EMAIL").expect("ED_EMAIL is required");
         let password = std::env::var("ED_PASSWORD").expect("ED_PASSWORD is required");
-        let session = api::login(&email, &password, api::latest_version()).unwrap();
-        let books = api::purchased_books(&session).unwrap();
+        let proxy = crate::settings::ProxySettings::default();
+        let session = api::login(&email, &password, api::latest_version(&proxy), &proxy).unwrap();
+        let books = api::purchased_books(&session, &proxy).unwrap();
         let book = books
             .first()
             .expect("purchased bookshelf must contain at least one book");
         let directory = tempfile::tempdir().unwrap();
         let encrypted = directory.path().join("sample.books.epub");
-        downloader::download_legacy(&session, book, &encrypted, 4, |_| {}).unwrap();
+        downloader::download_legacy(&session, book, &encrypted, 4, &proxy, |_| {}).unwrap();
         let plain = directory.path().join("sample.epub");
         lcp::decrypt_epub(&encrypted, &plain, &[session.email]).unwrap();
 
