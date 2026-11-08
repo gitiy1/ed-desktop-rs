@@ -106,7 +106,8 @@ fn pages_login_selection_and_settings_support_mouse_and_keyboard(cx: &mut TestAp
     });
     click(cx, "nav-library");
     click(cx, "field-5");
-    cx.simulate_keystrokes("ctrl-a backspace");
+    cx.simulate_keystrokes("secondary-a backspace");
+    view.update(cx, |view, _| assert!(view.search_text.is_empty()));
     click(cx, "退出登录");
     view.update(cx, |view, _| {
         assert!(view.session.is_none());
@@ -242,10 +243,21 @@ fn single_thread_and_source_retention_settings_are_explicit_and_localized(cx: &m
     });
     click(cx, "download-parallel");
     click(cx, "field-3");
-    cx.simulate_keystrokes("ctrl-a");
+    // GPUI maps secondary to Command on macOS and Control on Windows/Linux.
+    cx.simulate_keystrokes("secondary-a");
+    view.update(cx, |view, _| {
+        assert!(
+            view.select_all,
+            "the native select-all shortcut must select the field"
+        );
+    });
     cx.simulate_input("6");
     view.update(cx, |view, _| {
-        assert_eq!(view.settings.download_workers(), 6)
+        assert_eq!(
+            view.workers_text, "6",
+            "typing must replace the selected value"
+        );
+        assert_eq!(view.settings.download_workers(), 6);
     });
     click(cx, "keep-encrypted");
     view.update(cx, |view, _| assert!(view.settings.keep_encrypted_original));
