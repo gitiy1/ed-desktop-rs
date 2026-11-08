@@ -448,7 +448,18 @@ mod tests {
         archive.write_all(&resource_value).unwrap();
         archive.finish().unwrap();
 
-        decrypt_epub(&encrypted_epub, &plain_epub, &[PASSPHRASE.to_string()]).unwrap();
+        crate::export::finish_download(
+            &encrypted_epub,
+            &plain_epub,
+            true,
+            false,
+            &[PASSPHRASE.to_string()],
+        )
+        .unwrap();
+        assert!(
+            !encrypted_epub.exists(),
+            "successful export should clean the source by default"
+        );
 
         let mut archive = ZipArchive::new(File::open(plain_epub).unwrap()).unwrap();
         assert!(archive.by_name("META-INF/license.lcpl").is_err());

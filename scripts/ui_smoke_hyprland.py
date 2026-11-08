@@ -101,12 +101,30 @@ def main():
             capture("selected")
             click(1064, 196)  # Start the synthetic queue.
             capture("downloads")
+            click(940, 129)  # Clear the synthetic completed entry.
+            capture("completed-cleared")
+            click(1080, 205)  # Pause just the first task; the next one starts.
+            capture("task-paused")
+            click(1080, 205)  # Queue the first task for resume.
+            capture("task-resumed")
+            dispatch(f"hl.dsp.window.resize({{x=960,y=640,relative=false,window={selector}}})")
+            time.sleep(0.4)
+            capture("downloads-compact")
+            dispatch(f"hl.dsp.window.resize({{x=1180,y=820,relative=false,window={selector}}})")
+            time.sleep(0.4)
             click(1080, 129)  # Pause the queue.
             capture("paused")
             click(1080, 129)  # Resume it.
             capture("resumed")
             click(80, 221)  # Settings.
             capture("settings")
+            click(473, 544)  # Enable experimental parallel transfers.
+            capture("settings-parallel")
+            click(310, 563)  # Return to the default single stream.
+            capture("settings-single")
+            click(1105, 680)  # Keep encrypted sources after export.
+            capture("settings-keep-originals")
+            click(1105, 680)  # Restore automatic source cleanup.
             click(456, 326)  # Simplified Chinese.
             capture("settings-zh")
             click(374, 434)  # Explicit dark mode.

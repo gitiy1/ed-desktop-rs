@@ -57,17 +57,15 @@ impl std::error::Error for TransportReadError {
 }
 
 impl DownloadControl {
+    #[cfg(test)]
     pub fn pause(&self) {
         *self.paused.lock().expect("download control poisoned") = true;
     }
 
+    #[cfg(test)]
     pub fn resume(&self) {
         *self.paused.lock().expect("download control poisoned") = false;
         self.resumed.notify_all();
-    }
-
-    pub fn is_paused(&self) -> bool {
-        *self.paused.lock().expect("download control poisoned")
     }
 
     pub fn cancel(&self) {
@@ -970,6 +968,76 @@ mod tests {
         .unwrap();
         server.join().unwrap();
         assert_eq!(fs::read(output).unwrap(), content);
+    }
+
+    #[test]
+    fn queue_pauses_one_http_download_runs_the_next_and_resumes_saved_bytes() {
+        use crate::queue::DownloadQueue;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let content: Vec<u8> = (0..512 * 1024).map(|index| (index % 241) as u8).collect();
+        let server = start_range_server(listener, content.clone(), 3, None);
+        let directory = tempfile::tempdir().unwrap();
+        let session = make_session(format!("http://{address}/api/v4/"));
+        let queue = Arc::new(DownloadQueue::new(["a".into(), "b".into()]));
+        let first = queue.next_task().unwrap();
+        let first_output = directory.path().join("a.books.epub");
+        let pause_queue = queue.clone();
+        assert!(
+            download_legacy(
+                &session,
+                &test_book(),
+                &first_output,
+                1,
+                &ProxySettings::default(),
+                first.control.clone(),
+                move |_| pause_queue.set_paused(Some("a"), true),
+            )
+            .is_err()
+        );
+        assert!(!queue.begin_export(&first));
+        queue.requeue(&first.id);
+        let saved = partial_bytes(&first_output);
+        assert!(saved > 0 && saved < content.len() as u64);
+        let second = queue.next_task().unwrap();
+        assert_eq!(second.id, "b");
+        let second_output = directory.path().join("b.books.epub");
+        download_legacy(
+            &session,
+            &test_book(),
+            &second_output,
+            1,
+            &ProxySettings::default(),
+            second.control.clone(),
+            |_| {},
+        )
+        .unwrap();
+        assert!(queue.begin_export(&second));
+        queue.finish("b");
+        assert_eq!(
+            partial_bytes(&first_output),
+            saved,
+            "paused book kept writing while the next book ran"
+        );
+        queue.set_paused(Some("a"), false);
+        let resumed = queue.next_task().unwrap();
+        assert_eq!(resumed.id, "a");
+        download_legacy(
+            &session,
+            &test_book(),
+            &first_output,
+            1,
+            &ProxySettings::default(),
+            resumed.control.clone(),
+            |_| {},
+        )
+        .unwrap();
+        assert!(queue.begin_export(&resumed));
+        queue.finish("a");
+        assert!(queue.next_task().is_none());
+        server.join().unwrap();
+        assert_eq!(fs::read(first_output).unwrap(), content);
+        assert_eq!(fs::read(second_output).unwrap(), content);
     }
 
     #[test]

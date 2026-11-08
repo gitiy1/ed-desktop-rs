@@ -134,7 +134,10 @@ impl AppView {
             ActivePage::Library => vec![FocusedField::Search],
             ActivePage::Downloads => vec![],
             ActivePage::Settings => {
-                let mut fields = vec![FocusedField::Output, FocusedField::Workers];
+                let mut fields = vec![FocusedField::Output];
+                if self.settings.experimental_parallel_downloads {
+                    fields.push(FocusedField::Workers);
+                }
                 if self.settings.proxy.mode == ProxyMode::Manual {
                     fields.push(FocusedField::ProxyAddress);
                 }
@@ -214,7 +217,7 @@ impl AppView {
             self.settings.output_directory = PathBuf::from(self.output_text.trim());
         }
         if let Ok(workers) = self.workers_text.parse::<usize>() {
-            self.settings.workers = workers.clamp(1, 16);
+            self.settings.workers = workers.clamp(2, 16);
         }
         self.settings.proxy.address = self.proxy_address.trim().to_string();
         self.save_settings();
@@ -353,6 +356,23 @@ impl AppView {
         cx.notify();
     }
 
+    pub(super) fn set_parallel_downloads(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.settings.experimental_parallel_downloads = enabled;
+        if !enabled && self.focused_field == FocusedField::Workers {
+            self.focused_field = FocusedField::Output;
+            self.cursor = self.output_text.chars().count();
+            self.select_all = false;
+        }
+        self.save_settings();
+        cx.notify();
+    }
+
+    pub(super) fn toggle_keep_encrypted(&mut self, cx: &mut Context<Self>) {
+        self.settings.keep_encrypted_original = !self.settings.keep_encrypted_original;
+        self.save_settings();
+        cx.notify();
+    }
+
     pub(super) fn navigate(&mut self, item: NavItem, cx: &mut Context<Self>) {
         self.page = match item {
             NavItem::Library => ActivePage::Library,
@@ -388,8 +408,9 @@ impl AppView {
 
     pub(super) fn pause_downloads(&mut self, cx: &mut Context<Self>) {
         if let Some(control) = &self.download_control {
-            control.pause();
-            self.handle_event(UiEvent::Paused(true));
+            control.set_paused(None, true);
+            self.advance_demo_queue();
+            self.sync_queue_states();
             self.status = self.text(Text::PauseRequested).to_string();
             cx.notify();
         }
@@ -397,11 +418,31 @@ impl AppView {
 
     pub(super) fn resume_downloads(&mut self, cx: &mut Context<Self>) {
         if let Some(control) = &self.download_control {
-            control.resume();
-            self.handle_event(UiEvent::Paused(false));
+            control.set_paused(None, false);
+            self.advance_demo_queue();
+            self.sync_queue_states();
             self.status = self.text(Text::ResumeRequested).to_string();
             cx.notify();
         }
+    }
+
+    pub(super) fn toggle_task_pause(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(queue) = &self.download_control {
+            let paused = queue.task_state(id) == Some(TaskState::Paused);
+            queue.set_paused(Some(id), !paused);
+            self.advance_demo_queue();
+            self.sync_task_state(id);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn clear_completed_downloads(&mut self, cx: &mut Context<Self>) {
+        for row in &self.rows {
+            if matches!(row.state, DownloadState::Finished { .. }) {
+                self.queued_download_ids.remove(&row.book.id());
+            }
+        }
+        cx.notify();
     }
 
     pub(super) fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -421,13 +462,13 @@ impl AppView {
     }
 
     pub(super) fn start_downloads(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            self.start_demo_downloads(cx);
-            return;
-        }
         if self.busy {
             self.status = self.text(Text::QueueRunning).to_string();
             cx.notify();
+            return;
+        }
+        if self.demo {
+            self.start_demo_downloads(cx);
             return;
         }
         let Some(session) = self.session.clone() else {
@@ -453,11 +494,8 @@ impl AppView {
             return;
         }
         self.sync_settings();
-        let output = self.settings.output_directory.clone();
-        let workers = self.settings.workers;
-        let auto_decrypt = self.settings.auto_decrypt;
-        let proxy = self.settings.proxy.clone();
-        let control = Arc::new(DownloadControl::default());
+        let workers = self.settings.download_workers();
+        let control = Arc::new(DownloadQueue::new(books.iter().map(Book::id)));
         self.download_control = Some(Arc::clone(&control));
         for book in &books {
             self.queued_download_ids.insert(book.id());
@@ -467,8 +505,6 @@ impl AppView {
             .iter()
             .map(|row| row.book.clone())
             .collect::<Vec<_>>();
-        let stems = export_stems(&all_books);
-        let sender = self.event_sender();
         self.busy = true;
         self.page = ActivePage::Downloads;
         self.status = match locale {
@@ -478,80 +514,14 @@ impl AppView {
             }
         };
         cx.notify();
-        thread::spawn(move || {
-            for book in books {
-                if control.wait_until_resumed().is_err() {
-                    break;
-                }
-                let id = book.id();
-                sender.send(UiEvent::Started { id: id.clone() });
-                let file_stem = &stems[&book.id()];
-                let raw_path = output.join(format!("{file_stem}.books.epub"));
-                let progress_sender = sender.clone();
-                let progress_id = id.clone();
-                let book_control = Arc::clone(&control);
-                let downloaded = downloader::download_legacy(
-                    &session,
-                    &book,
-                    &raw_path,
-                    workers,
-                    &proxy,
-                    book_control,
-                    move |progress| {
-                        progress_sender.send(UiEvent::Progress {
-                            id: progress_id.clone(),
-                            progress,
-                        });
-                    },
-                );
-                match downloaded {
-                    Ok(raw_path) if auto_decrypt => {
-                        if control.wait_until_resumed().is_err() {
-                            break;
-                        }
-                        let plain_path = output.join(format!("{file_stem}.epub"));
-                        let passphrase = session.email.clone();
-                        match lcp::decrypt_epub(&raw_path, &plain_path, &[passphrase]) {
-                            Ok(path) => {
-                                sender.send(UiEvent::Finished {
-                                    id,
-                                    path,
-                                    decrypted: true,
-                                });
-                            }
-                            Err(error) => {
-                                sender.send(UiEvent::Failed {
-                                    id,
-                                    message: format!(
-                                        "{}: {error:#}",
-                                        i18n::text(locale, Text::Downloaded)
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                    Ok(path) => {
-                        sender.send(UiEvent::Finished {
-                            id,
-                            path,
-                            decrypted: false,
-                        });
-                    }
-                    Err(error) => {
-                        if control.is_cancelled() {
-                            break;
-                        }
-                        sender.send(UiEvent::Failed {
-                            id,
-                            message: format!("{error:#}"),
-                        });
-                    }
-                }
-            }
-            sender.send(UiEvent::QueueDone);
-            sender.send(UiEvent::Message(
-                i18n::text(locale, Text::QueueFinished).to_string(),
-            ));
-        });
+        jobs::start_queue(
+            session,
+            books,
+            export_stems(&all_books),
+            self.settings.clone(),
+            control,
+            self.event_sender(),
+            locale,
+        );
     }
 }

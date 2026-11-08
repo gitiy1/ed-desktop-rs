@@ -1,12 +1,44 @@
 use super::*;
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point};
 
 fn click(cx: &mut VisualTestContext, selector: &'static str) {
+    for _ in 0..12 {
+        cx.refresh().unwrap();
+        let viewport = cx.debug_bounds("settings-scroll");
+        if let Some(bounds) = cx.debug_bounds(selector) {
+            if let Some(viewport) = viewport
+                && bounds.center().x >= viewport.left()
+                && (bounds.center().y < viewport.top() || bounds.center().y > viewport.bottom())
+            {
+                scroll_settings(
+                    cx,
+                    if bounds.center().y < viewport.top() {
+                        200.
+                    } else {
+                        -200.
+                    },
+                );
+                continue;
+            }
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            return;
+        }
+        if viewport.is_none() {
+            break;
+        }
+        scroll_settings(cx, -200.);
+    }
+    panic!("missing or unreachable control {selector}");
+}
+
+fn scroll_settings(cx: &mut VisualTestContext, delta: f32) {
     cx.refresh().unwrap();
-    let bounds = cx
-        .debug_bounds(selector)
-        .unwrap_or_else(|| panic!("missing control {selector}"));
-    cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    let viewport = cx.debug_bounds("settings-scroll").unwrap();
+    cx.simulate_event(ScrollWheelEvent {
+        position: viewport.center(),
+        delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
+        ..Default::default()
+    });
 }
 
 #[gpui::test]
@@ -60,11 +92,7 @@ fn pages_login_selection_and_settings_support_mouse_and_keyboard(cx: &mut TestAp
         assert_eq!(view.settings.proxy.address, "127.0.0.1:1080");
         assert_eq!(
             view.visible_fields(),
-            vec![
-                FocusedField::Output,
-                FocusedField::Workers,
-                FocusedField::ProxyAddress
-            ]
+            vec![FocusedField::Output, FocusedField::ProxyAddress]
         );
     });
     // Focus cycles within the current page, including reverse tab.
@@ -95,24 +123,24 @@ fn queue_pause_resume_language_switch_and_logout_cancel(cx: &mut TestAppContext)
     let (view, cx) = cx.add_window_view(|_, cx| AppView::demo("downloads", cx));
     cx.simulate_resize(size(px(1180.), px(820.)));
     let control = view.update(cx, |view, _| view.download_control.clone().unwrap());
-    assert!(control.is_paused());
-    click(cx, "Resume");
-    assert!(!control.is_paused());
+    assert!(control.has_paused());
+    click(cx, "Resume all");
+    assert!(!control.has_paused());
     view.update(cx, |view, _| {
         assert_eq!(view.rows[0].state, DownloadState::Downloading)
     });
     click(cx, "nav-settings");
     click(cx, "language-zh-cn");
     click(cx, "nav-downloads");
-    click(cx, "暂停");
-    assert!(control.is_paused());
+    click(cx, "全部暂停");
+    assert!(control.has_paused());
     view.update(cx, |view, _| {
         assert_eq!(view.rows[0].state, DownloadState::Paused);
         assert_eq!(view.rows[0].state.label(view.locale()), "已暂停");
     });
-    click(cx, "继续");
-    assert!(!control.is_paused());
-    click(cx, "暂停");
+    click(cx, "全部继续");
+    assert!(!control.has_paused());
+    click(cx, "全部暂停");
     let sender = view.update(cx, |view, _| view.event_sender());
     click(cx, "退出登录");
     assert!(control.is_cancelled());
@@ -125,6 +153,117 @@ fn queue_pause_resume_language_switch_and_logout_cancel(cx: &mut TestAppContext)
         assert!(view.download_control.is_none());
         assert!(view.queued_download_ids.is_empty());
         assert_ne!(view.status, "stale account event");
+    });
+}
+
+#[gpui::test]
+fn task_pause_skips_to_next_book_and_clear_completed_preserves_exports(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| AppView::demo("downloads", cx));
+    cx.simulate_resize(size(px(960.), px(640.)));
+    let directory = tempfile::tempdir().unwrap();
+    let exported = directory.path().join("finished.epub");
+    std::fs::write(&exported, b"exported book").unwrap();
+    view.update(cx, |view, _| {
+        view.rows[2].state = DownloadState::Finished {
+            path: exported.clone(),
+            decrypted: true,
+            cleanup_warning: None,
+        };
+    });
+    click(cx, "Clear completed");
+    assert_eq!(std::fs::read(&exported).unwrap(), b"exported book");
+    view.update(cx, |view, _| {
+        assert_eq!(view.queued_download_ids.len(), 2);
+        assert_eq!(view.rows.len(), 6);
+        assert!(view.busy);
+    });
+    click(cx, "Resume all");
+    click(cx, "task-control-0");
+    view.update(cx, |view, _| {
+        assert_eq!(view.rows[0].state, DownloadState::Paused);
+        assert_eq!(view.rows[0].received, 1_920_000);
+        assert_eq!(view.rows[1].state, DownloadState::Downloading);
+    });
+    click(cx, "task-control-0");
+    view.update(cx, |view, _| {
+        assert_eq!(view.rows[0].state, DownloadState::Queued);
+        assert_eq!(view.rows[1].state, DownloadState::Downloading);
+    });
+    // Pause a pending item independently, then switch the active item.
+    click(cx, "task-control-0");
+    click(cx, "task-control-1");
+    click(cx, "task-control-0");
+    view.update(cx, |view, _| {
+        assert_eq!(view.rows[0].state, DownloadState::Downloading);
+        assert_eq!(view.rows[1].state, DownloadState::Paused);
+    });
+    cx.refresh().unwrap();
+    let root = cx.debug_bounds("app-root").unwrap();
+    for selector in [
+        "task-control-0",
+        "task-control-1",
+        "Pause all",
+        "Resume all",
+    ] {
+        let bounds = cx.debug_bounds(selector).unwrap();
+        assert!(bounds.left() >= root.left());
+        assert!(bounds.right() <= root.right());
+        assert!(bounds.bottom() <= root.bottom());
+    }
+    // Clearing the last completed entries leaves an empty queue view.
+    view.update(cx, |view, cx| {
+        view.download_control.as_ref().unwrap().finish("demo-1");
+        view.download_control.as_ref().unwrap().finish("demo-2");
+        for row in view.rows.iter_mut().take(2) {
+            row.state = DownloadState::Finished {
+                path: exported.clone(),
+                decrypted: true,
+                cleanup_warning: None,
+            };
+        }
+        view.handle_event(UiEvent::QueueDone);
+        cx.notify();
+    });
+    click(cx, "Clear completed");
+    view.update(cx, |view, _| assert!(view.queued_download_ids.is_empty()));
+    cx.refresh().unwrap();
+    assert!(cx.debug_bounds("empty-downloads").is_some());
+    assert!(exported.exists());
+}
+
+#[gpui::test]
+fn single_thread_and_source_retention_settings_are_explicit_and_localized(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| AppView::demo("settings", cx));
+    cx.simulate_resize(size(px(1180.), px(820.)));
+    view.update(cx, |view, _| {
+        assert_eq!(view.settings.download_workers(), 1);
+        assert!(!view.settings.keep_encrypted_original);
+        assert!(!view.visible_fields().contains(&FocusedField::Workers));
+    });
+    click(cx, "download-parallel");
+    click(cx, "field-3");
+    cx.simulate_keystrokes("ctrl-a");
+    cx.simulate_input("6");
+    view.update(cx, |view, _| {
+        assert_eq!(view.settings.download_workers(), 6)
+    });
+    click(cx, "keep-encrypted");
+    view.update(cx, |view, _| assert!(view.settings.keep_encrypted_original));
+    click(cx, "download-single");
+    view.update(cx, |view, _| {
+        assert_eq!(view.settings.download_workers(), 1);
+        assert_eq!(view.settings.workers, 6);
+        assert_ne!(view.focused_field, FocusedField::Workers);
+    });
+    scroll_settings(cx, 1000.);
+    click(cx, "language-zh-cn");
+    click(cx, "keep-encrypted");
+    click(cx, "auto-decrypt");
+    view.update(cx, |view, _| {
+        assert!(!view.settings.keep_encrypted_original);
+        assert!(!view.settings.auto_decrypt);
+        assert_eq!(view.text(Text::SingleThread), "单线程");
+        assert_eq!(view.text(Text::ClearCompleted), "清除已完成");
     });
 }
 

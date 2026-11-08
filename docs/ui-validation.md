@@ -18,6 +18,21 @@ CI portability follow-up (2026-11-09): the pause/resume test now measures readab
 
 The macOS job uses the ARM64 `macos-15` image. Packaging emits an ad-hoc-signed `.app`, a ZIP preserving the app's permissions, and a DMG containing the app plus an Applications shortcut. Local packaging orchestration was checked with Apple CLI commands mocked, including bundle metadata, versioning, permissions, archive layout, and paths containing spaces. The workflow runs actual `lipo`, `plutil`, `codesign`, `unzip`, and `hdiutil` checks on macOS. Native signing/DMG creation has not been executed on the local Linux host. Checkout and artifact upload use their Node 24 v6 actions.
 
+Queue and export controls follow-up (2026-11-09): each pending or downloading book now has Pause/Resume. Pausing a transfer retains its partial files and lets the next unpaused book run; resume waits for the current transfer and reuses the saved offsets. Toolbar controls pause/resume all and clear completed records. The clear action retains actual files and the purchased library. Exporting tasks finish their export before the scheduler moves on.
+
+Single-thread downloads are now the default, including when loading older settings with a saved worker count. Parallel transfers require explicitly enabling experimental mode in Settings, with 2–16 connections per book. Encrypted originals are removed after a successful export unless Keep encrypted originals is enabled. Failed exports retain the source and any previous export; temporary exports are cleaned up. Cleanup failures retain a completed export and show a warning. These preferences are saved and apply to the next queue.
+
+`cargo nextest run --offline --locked` passed 39 regular tests with the live service test skipped. The new real HTTP queue test passed 20/20 stress iterations: it pauses the first book, downloads the second, verifies no change to the first partial file, and resumes the first to byte-for-byte equality. GPUI mouse tests cover individual and global controls, clearing while active and after the last completion, settings, language changes, and compact bounds. Filesystem tests cover default cleanup, explicit source retention, failed export preservation, staging cleanup, and cleanup warnings. The existing synthetic LCP fixture now also checks actual export through the cleanup wrapper.
+
+The opt-in live test passed using the configured `.env` account: login, purchased-book listing, legacy download with one connection, sanitized EPUB export, and automatic encrypted-source cleanup. Archive entries were read back and the absent license/encryption entries were checked. All downloaded and exported files were in an automatically removed temporary directory. No account values or traffic captures were used in screenshots.
+
+The native Hyprland smoke script ran with the release binary and synthetic data. Captures were inspected for clear-completed, individual pause/resume, the active next book, global pause/resume, experimental parallel mode and its worker field, returning to single-thread mode, source-retention toggle, English/Chinese, dark/light, sign out, and the 960 × 640 layout. The script restored focus and pointer position. Linux release build, Clippy with `-D warnings`, Windows GNU test-target compilation, and actionlint passed. Native Windows/macOS execution remains for CI.
+
+- [Completed queue and per-task controls](screenshots/downloads-controls.png)
+- [Paused task with the next book downloading](screenshots/download-task-paused.png)
+- [Compact downloads](screenshots/downloads-compact.png)
+- [Chinese download and export settings](screenshots/settings-downloads-zh.png)
+
 - [Library](screenshots/library.png)
 - [Paused downloads in Chinese](screenshots/paused-zh.png)
 - [Settings in Chinese](screenshots/settings-zh.png)

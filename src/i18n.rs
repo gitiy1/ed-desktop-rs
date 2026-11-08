@@ -77,7 +77,6 @@ pub enum Text {
     Ready,
     Queued,
     Downloading,
-    Downloaded,
     Failed,
     DecryptedFile,
     EncryptedFile,
@@ -103,6 +102,20 @@ pub enum Text {
     SettingsSubtitle,
     SearchBooks,
     Paused,
+    PauseAll,
+    ResumeAll,
+    ClearCompleted,
+    DownloadBehavior,
+    SingleThread,
+    ExperimentalParallel,
+    DownloadModeHint,
+    NextQueueHint,
+    KeepEncrypted,
+    KeepEncryptedHint,
+    Exporting,
+    CleanupFailed,
+    On,
+    Off,
 }
 
 pub fn text(locale: Locale, key: Text) -> &'static str {
@@ -152,7 +165,6 @@ pub fn text(locale: Locale, key: Text) -> &'static str {
         (Locale::English, Text::Ready) => "Ready",
         (Locale::English, Text::Queued) => "Queued",
         (Locale::English, Text::Downloading) => "Downloading",
-        (Locale::English, Text::Downloaded) => "Downloaded",
         (Locale::English, Text::Failed) => "Failed",
         (Locale::English, Text::DecryptedFile) => "Ready",
         (Locale::English, Text::EncryptedFile) => "Downloaded",
@@ -178,6 +190,24 @@ pub fn text(locale: Locale, key: Text) -> &'static str {
         (Locale::English, Text::SettingsSubtitle) => "Download location, language and network.",
         (Locale::English, Text::SearchBooks) => "Search title or author",
         (Locale::English, Text::Paused) => "Paused",
+        (Locale::English, Text::PauseAll) => "Pause all",
+        (Locale::English, Text::ResumeAll) => "Resume all",
+        (Locale::English, Text::ClearCompleted) => "Clear completed",
+        (Locale::English, Text::DownloadBehavior) => "DOWNLOAD & EXPORT",
+        (Locale::English, Text::SingleThread) => "Single thread",
+        (Locale::English, Text::ExperimentalParallel) => "Parallel · experimental",
+        (Locale::English, Text::DownloadModeHint) => {
+            "One book at a time. Experimental mode uses multiple connections per book."
+        }
+        (Locale::English, Text::NextQueueHint) => "Changes apply to the next queue.",
+        (Locale::English, Text::KeepEncrypted) => "Keep encrypted originals",
+        (Locale::English, Text::KeepEncryptedHint) => {
+            "Off by default: remove .books.epub after a successful export. Failed exports keep the source."
+        }
+        (Locale::English, Text::Exporting) => "Exporting EPUB…",
+        (Locale::English, Text::CleanupFailed) => "Exported; could not remove encrypted source",
+        (Locale::English, Text::On) => "On",
+        (Locale::English, Text::Off) => "Off",
         (Locale::SimplifiedChinese, Text::NotSignedIn) => "未登录",
         (Locale::SimplifiedChinese, Text::Email) => "邮箱",
         (Locale::SimplifiedChinese, Text::EmailPlaceholder) => "账号邮箱",
@@ -223,7 +253,6 @@ pub fn text(locale: Locale, key: Text) -> &'static str {
         (Locale::SimplifiedChinese, Text::Ready) => "就绪",
         (Locale::SimplifiedChinese, Text::Queued) => "等待中",
         (Locale::SimplifiedChinese, Text::Downloading) => "下载中",
-        (Locale::SimplifiedChinese, Text::Downloaded) => "已下载",
         (Locale::SimplifiedChinese, Text::Failed) => "失败",
         (Locale::SimplifiedChinese, Text::DecryptedFile) => "已导出",
         (Locale::SimplifiedChinese, Text::EncryptedFile) => "已下载",
@@ -249,6 +278,24 @@ pub fn text(locale: Locale, key: Text) -> &'static str {
         (Locale::SimplifiedChinese, Text::SettingsSubtitle) => "管理保存位置、语言和网络。",
         (Locale::SimplifiedChinese, Text::SearchBooks) => "搜索书名或作者",
         (Locale::SimplifiedChinese, Text::Paused) => "已暂停",
+        (Locale::SimplifiedChinese, Text::PauseAll) => "全部暂停",
+        (Locale::SimplifiedChinese, Text::ResumeAll) => "全部继续",
+        (Locale::SimplifiedChinese, Text::ClearCompleted) => "清除已完成",
+        (Locale::SimplifiedChinese, Text::DownloadBehavior) => "下载与导出",
+        (Locale::SimplifiedChinese, Text::SingleThread) => "单线程",
+        (Locale::SimplifiedChinese, Text::ExperimentalParallel) => "多线程 · 实验性",
+        (Locale::SimplifiedChinese, Text::DownloadModeHint) => {
+            "每次下载一本书。实验性多线程会为每本书使用多个连接。"
+        }
+        (Locale::SimplifiedChinese, Text::NextQueueHint) => "更改将在下一批任务中生效。",
+        (Locale::SimplifiedChinese, Text::KeepEncrypted) => "保留加密原件",
+        (Locale::SimplifiedChinese, Text::KeepEncryptedHint) => {
+            "默认关闭：成功导出后清理 .books.epub；导出失败时保留原件。"
+        }
+        (Locale::SimplifiedChinese, Text::Exporting) => "正在导出 EPUB…",
+        (Locale::SimplifiedChinese, Text::CleanupFailed) => "已导出；加密原件清理失败",
+        (Locale::SimplifiedChinese, Text::On) => "开",
+        (Locale::SimplifiedChinese, Text::Off) => "关",
     }
 }
 

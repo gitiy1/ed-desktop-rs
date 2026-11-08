@@ -1,9 +1,11 @@
 mod api;
 mod downloader;
+mod export;
 mod filenames;
 mod i18n;
 mod lcp;
 mod network;
+mod queue;
 mod settings;
 mod theme;
 mod ui;
@@ -27,7 +29,7 @@ fn main() {
 
 #[cfg(test)]
 mod live_tests {
-    use crate::{api, downloader, lcp};
+    use crate::{api, downloader, export};
     use std::fs::File;
     use std::io::Read;
     use zip::ZipArchive;
@@ -54,14 +56,18 @@ mod live_tests {
             &session,
             book,
             &encrypted,
-            4,
+            1,
             &proxy,
             std::sync::Arc::new(downloader::DownloadControl::default()),
             |_| {},
         )
         .unwrap();
         let plain = directory.path().join(format!("{stem}.epub"));
-        lcp::decrypt_epub(&encrypted, &plain, &[session.email]).unwrap();
+        let exported =
+            export::finish_download(&encrypted, &plain, true, false, &[session.email]).unwrap();
+        assert!(exported.decrypted);
+        assert!(exported.cleanup_warning.is_none());
+        assert!(!encrypted.exists());
 
         let mut archive = ZipArchive::new(File::open(plain).unwrap()).unwrap();
         assert!(archive.by_name("META-INF/license.lcpl").is_err());

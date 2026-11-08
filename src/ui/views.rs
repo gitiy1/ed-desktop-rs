@@ -21,6 +21,7 @@ impl AppView {
                     return None;
                 }
                 let id = row.book.id();
+                let task_id = id.clone();
                 let cover = cover_color(&id);
                 let selected = row.selected;
                 let title = row.book.title();
@@ -43,6 +44,8 @@ impl AppView {
                 };
                 Some(
                     div()
+                        .id(("book-row", index))
+                        .debug_selector(move || format!("book-row-{index}"))
                         .flex()
                         .items_center()
                         .gap_3()
@@ -120,7 +123,7 @@ impl AppView {
                         .children(if downloads_only {
                             Some(
                                 div()
-                                    .w(px(290.))
+                                    .w(px(228.))
                                     .flex_shrink_0()
                                     .flex()
                                     .flex_col()
@@ -131,7 +134,19 @@ impl AppView {
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .text_xs()
-                                            .text_color(palette.secondary)
+                                            .text_color(
+                                                if matches!(
+                                                    row.state,
+                                                    DownloadState::Finished {
+                                                        cleanup_warning: Some(_),
+                                                        ..
+                                                    }
+                                                ) {
+                                                    palette.paused
+                                                } else {
+                                                    palette.secondary
+                                                },
+                                            )
                                             .child(status),
                                     )
                                     .child(
@@ -162,6 +177,37 @@ impl AppView {
                                             .child(speed),
                                     ),
                             )
+                        } else {
+                            None
+                        })
+                        .children(if downloads_only {
+                            Some(div().w(px(88.)).flex_shrink_0().children(
+                                if matches!(
+                                    row.state,
+                                    DownloadState::Queued
+                                        | DownloadState::Downloading
+                                        | DownloadState::Paused
+                                ) {
+                                    Some(
+                                        div()
+                                            .id(("task-control", index))
+                                            .debug_selector(move || format!("task-control-{index}"))
+                                            .child(self.button(
+                                                if row.state == DownloadState::Paused {
+                                                    self.text(Text::Resume)
+                                                } else {
+                                                    self.text(Text::Pause)
+                                                },
+                                                false,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.toggle_task_pause(&task_id, cx)
+                                                }),
+                                            )),
+                                    )
+                                } else {
+                                    None
+                                },
+                            ))
                         } else {
                             None
                         }),
@@ -344,7 +390,13 @@ impl AppView {
         let palette = self.palette();
         let control = self.download_control.clone();
         let has_downloads = !self.queued_download_ids.is_empty();
-        let paused = control.as_ref().is_some_and(|control| control.is_paused());
+        let paused = control
+            .as_ref()
+            .is_some_and(|control| control.has_paused() && !control.has_unpaused());
+        let has_completed = self.rows.iter().any(|row| {
+            self.queued_download_ids.contains(&row.book.id())
+                && matches!(row.state, DownloadState::Finished { .. })
+        });
         let queue_label = match self.locale() {
             Locale::English => format!("{} books in this queue", self.queued_download_ids.len()),
             Locale::SimplifiedChinese => {
@@ -369,6 +421,8 @@ impl AppView {
                     .px_6()
                     .py_4()
                     .flex()
+                    .flex_wrap()
+                    .gap_3()
                     .justify_between()
                     .items_center()
                     .border_b_1()
@@ -390,28 +444,53 @@ impl AppView {
                                     .child(queue_label),
                             ),
                     )
-                    .child(if self.busy && paused {
-                        self.button(
-                            self.text(Text::Resume),
-                            true,
-                            cx.listener(|this, _, _, cx| this.resume_downloads(cx)),
-                        )
-                        .into_any_element()
-                    } else if self.busy && control.is_some() {
-                        self.button(
-                            self.text(Text::Pause),
-                            false,
-                            cx.listener(|this, _, _, cx| this.pause_downloads(cx)),
-                        )
-                        .into_any_element()
-                    } else {
-                        div().into_any_element()
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .children(has_completed.then(|| {
+                                self.button(
+                                    self.text(Text::ClearCompleted),
+                                    false,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.clear_completed_downloads(cx)
+                                    }),
+                                )
+                            }))
+                            .children(
+                                control
+                                    .as_ref()
+                                    .is_some_and(|control| control.has_unpaused())
+                                    .then(|| {
+                                        self.button(
+                                            self.text(Text::PauseAll),
+                                            false,
+                                            cx.listener(|this, _, _, cx| this.pause_downloads(cx)),
+                                        )
+                                    }),
+                            )
+                            .children(
+                                control
+                                    .as_ref()
+                                    .is_some_and(|control| control.has_paused())
+                                    .then(|| {
+                                        self.button(
+                                            self.text(Text::ResumeAll),
+                                            true,
+                                            cx.listener(|this, _, _, cx| this.resume_downloads(cx)),
+                                        )
+                                    }),
+                            ),
+                    ),
             )
             .child(if has_downloads {
                 self.render_book_list(cx, true).into_any_element()
             } else {
                 div()
+                    .id("empty-downloads")
+                    .debug_selector(|| "empty-downloads".to_string())
                     .flex_grow()
                     .flex()
                     .justify_center()
@@ -420,235 +499,5 @@ impl AppView {
                     .child(self.text(Text::NoDownloads))
                     .into_any_element()
             })
-    }
-
-    pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = self.palette();
-        div()
-            .id("settings-scroll")
-            .size_full()
-            .overflow_y_scroll()
-            .px_6()
-            .child(
-                self.settings_section(
-                    self.text(Text::DownloadFolder),
-                    div()
-                        .flex()
-                        .items_end()
-                        .gap_3()
-                        .child(self.input_field(
-                            InputFieldSpec {
-                                field: FocusedField::Output,
-                                label: self.text(Text::SaveTo),
-                                value: self.output_text.clone(),
-                                placeholder: self.text(Text::FolderPlaceholder),
-                                focused: self.focused_field == FocusedField::Output,
-                                cursor: self.cursor,
-                                masked: false,
-                            },
-                            cx.listener(|this, _, window, cx| {
-                                this.click_field(FocusedField::Output, window, cx)
-                            }),
-                        ))
-                        .child(self.button(
-                            self.text(Text::Browse),
-                            false,
-                            cx.listener(|this, _, window, cx| this.choose_folder(window, cx)),
-                        ))
-                        .child(self.input_field(
-                            InputFieldSpec {
-                                field: FocusedField::Workers,
-                                label: self.text(Text::Workers),
-                                value: self.workers_text.clone(),
-                                placeholder: "4",
-                                focused: self.focused_field == FocusedField::Workers,
-                                cursor: self.cursor,
-                                masked: false,
-                            },
-                            cx.listener(|this, _, window, cx| {
-                                this.click_field(FocusedField::Workers, window, cx)
-                            }),
-                        )),
-                ),
-            )
-            .child(
-                self.settings_section(
-                    self.text(Text::Preferences),
-                    div()
-                        .flex()
-                        .items_end()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(palette.secondary)
-                                        .child(self.text(Text::Language)),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap_2()
-                                        .child(self.segmented(
-                                            "language-system",
-                                            self.text(Text::FollowSystem),
-                                            self.settings.language == LanguagePreference::System,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.set_language(LanguagePreference::System, cx)
-                                            }),
-                                        ))
-                                        .child(self.segmented(
-                                            "language-english",
-                                            self.text(Text::English),
-                                            self.settings.language == LanguagePreference::English,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.set_language(LanguagePreference::English, cx)
-                                            }),
-                                        ))
-                                        .child(self.segmented(
-                                            "language-zh-cn",
-                                            self.text(Text::SimplifiedChinese),
-                                            self.settings.language
-                                                == LanguagePreference::SimplifiedChinese,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.set_language(
-                                                    LanguagePreference::SimplifiedChinese,
-                                                    cx,
-                                                )
-                                            }),
-                                        )),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("auto-decrypt")
-                                .h(px(38.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .text_sm()
-                                .cursor_pointer()
-                                .child(if self.settings.auto_decrypt {
-                                    format!("☑ {}", self.text(Text::AutoDecrypt))
-                                } else {
-                                    format!("☐ {}", self.text(Text::AutoDecrypt))
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_decrypt(cx))),
-                        ),
-                ),
-            )
-            .child(
-                self.settings_section(
-                    self.text(Text::Appearance),
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(self.segmented(
-                            "theme-system",
-                            self.text(Text::FollowSystem),
-                            self.settings.theme == ThemePreference::System,
-                            cx.listener(|this, _, _, cx| {
-                                this.set_theme(ThemePreference::System, cx)
-                            }),
-                        ))
-                        .child(self.segmented(
-                            "theme-dark",
-                            self.text(Text::DarkTheme),
-                            self.settings.theme == ThemePreference::Dark,
-                            cx.listener(|this, _, _, cx| this.set_theme(ThemePreference::Dark, cx)),
-                        ))
-                        .child(self.segmented(
-                            "theme-light",
-                            self.text(Text::LightTheme),
-                            self.settings.theme == ThemePreference::Light,
-                            cx.listener(|this, _, _, cx| {
-                                this.set_theme(ThemePreference::Light, cx)
-                            }),
-                        )),
-                ),
-            )
-            .child(
-                self.settings_section(
-                    self.text(Text::Network),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(self.segmented(
-                                    "proxy-system",
-                                    self.text(Text::SystemProxy),
-                                    self.settings.proxy.mode == ProxyMode::System,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.set_proxy_mode(ProxyMode::System, cx)
-                                    }),
-                                ))
-                                .child(self.segmented(
-                                    "proxy-manual",
-                                    self.text(Text::ManualProxy),
-                                    self.settings.proxy.mode == ProxyMode::Manual,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.set_proxy_mode(ProxyMode::Manual, cx)
-                                    }),
-                                ))
-                                .child(
-                                    div()
-                                        .flex_grow()
-                                        .text_xs()
-                                        .text_color(palette.muted)
-                                        .child(self.text(Text::SystemProxyFallback)),
-                                ),
-                        )
-                        .children(if self.settings.proxy.mode == ProxyMode::Manual {
-                            Some(
-                                div()
-                                    .flex()
-                                    .items_end()
-                                    .gap_2()
-                                    .child(self.segmented(
-                                        "proxy-http",
-                                        self.text(Text::HttpProxy),
-                                        self.settings.proxy.protocol == ProxyProtocol::Http,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.set_proxy_protocol(ProxyProtocol::Http, cx)
-                                        }),
-                                    ))
-                                    .child(self.segmented(
-                                        "proxy-socks5",
-                                        self.text(Text::Socks5Proxy),
-                                        self.settings.proxy.protocol == ProxyProtocol::Socks5,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.set_proxy_protocol(ProxyProtocol::Socks5, cx)
-                                        }),
-                                    ))
-                                    .child(self.input_field(
-                                        InputFieldSpec {
-                                            field: FocusedField::ProxyAddress,
-                                            label: self.text(Text::ProxyAddress),
-                                            value: self.proxy_address.clone(),
-                                            placeholder: self.text(Text::ProxyAddressPlaceholder),
-                                            focused: self.focused_field
-                                                == FocusedField::ProxyAddress,
-                                            cursor: self.cursor,
-                                            masked: false,
-                                        },
-                                        cx.listener(|this, _, window, cx| {
-                                            this.click_field(FocusedField::ProxyAddress, window, cx)
-                                        }),
-                                    )),
-                            )
-                        } else {
-                            None
-                        }),
-                ),
-            )
     }
 }

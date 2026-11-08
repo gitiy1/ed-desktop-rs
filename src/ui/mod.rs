@@ -1,5 +1,7 @@
 mod actions;
 mod demo;
+mod jobs;
+mod settings_view;
 mod shell;
 #[cfg(test)]
 mod tests;
@@ -9,10 +11,11 @@ mod widgets;
 pub use shell::run;
 
 use crate::api::{self, Book, Session};
-use crate::downloader::{self, DownloadControl, DownloadProgress};
+use crate::downloader::{self, DownloadProgress};
+use crate::export;
 use crate::filenames::export_stems;
 use crate::i18n::{self, LanguagePreference, Locale, Text};
-use crate::lcp;
+use crate::queue::{DownloadQueue, TaskState};
 use crate::settings::{self, AppSettings, ProxyMode, ProxyProtocol};
 use crate::theme::{Palette, ThemePreference};
 use anyhow::Result;
@@ -68,7 +71,12 @@ enum DownloadState {
     Queued,
     Downloading,
     Paused,
-    Finished { path: PathBuf, decrypted: bool },
+    Exporting,
+    Finished {
+        path: PathBuf,
+        decrypted: bool,
+        cleanup_warning: Option<String>,
+    },
     Failed(String),
 }
 
@@ -79,12 +87,20 @@ impl DownloadState {
             Self::Queued => i18n::text(locale, Text::Queued).to_string(),
             Self::Downloading => i18n::text(locale, Text::Downloading).to_string(),
             Self::Paused => i18n::text(locale, Text::Paused).to_string(),
-            Self::Finished { path, decrypted } => {
+            Self::Exporting => i18n::text(locale, Text::Exporting).to_string(),
+            Self::Finished {
+                path,
+                decrypted,
+                cleanup_warning,
+            } => {
                 let label = if *decrypted {
                     i18n::text(locale, Text::DecryptedFile)
                 } else {
                     i18n::text(locale, Text::EncryptedFile)
                 };
+                if let Some(warning) = cleanup_warning {
+                    return format!("{}: {warning}", i18n::text(locale, Text::CleanupFailed));
+                }
                 format!(
                     "{label}: {}",
                     path.file_name().unwrap_or_default().to_string_lossy()
@@ -95,7 +111,10 @@ impl DownloadState {
     }
 
     fn is_active(&self) -> bool {
-        matches!(self, Self::Queued | Self::Downloading | Self::Paused)
+        matches!(
+            self,
+            Self::Queued | Self::Downloading | Self::Paused | Self::Exporting
+        )
     }
 }
 
@@ -144,12 +163,15 @@ enum UiEvent {
         id: String,
         path: PathBuf,
         decrypted: bool,
+        cleanup_warning: Option<String>,
     },
     Failed {
         id: String,
         message: String,
     },
-    Paused(bool),
+    TaskChanged {
+        id: String,
+    },
     QueueDone,
     Message(String),
 }
@@ -178,7 +200,7 @@ pub struct AppView {
     rows: Vec<BookRow>,
     queued_download_ids: HashSet<String>,
     page: ActivePage,
-    download_control: Option<Arc<DownloadControl>>,
+    download_control: Option<Arc<DownloadQueue>>,
     status: String,
     focused_field: FocusedField,
     cursor: usize,
@@ -322,18 +344,8 @@ impl AppView {
                 self.status = format!("{}: {error:#}", self.text(Text::RefreshFailed));
             }
             UiEvent::Started { id } => {
-                let paused = self
-                    .download_control
-                    .as_ref()
-                    .is_some_and(|control| control.is_paused());
+                self.sync_task_state(&id);
                 if let Some(row) = self.row_mut(&id) {
-                    row.state = if paused {
-                        DownloadState::Paused
-                    } else {
-                        DownloadState::Downloading
-                    };
-                    row.received = 0;
-                    row.total = 0;
                     row.speed = 0.0;
                 }
             }
@@ -341,16 +353,25 @@ impl AppView {
                 if let Some(row) = self.row_mut(&id) {
                     row.received = progress.received;
                     row.total = progress.total;
-                    row.speed = progress.bytes_per_second;
+                    row.speed = if row.state == DownloadState::Downloading {
+                        progress.bytes_per_second
+                    } else {
+                        0.0
+                    };
                 }
             }
             UiEvent::Finished {
                 id,
                 path,
                 decrypted,
+                cleanup_warning,
             } => {
                 if let Some(row) = self.row_mut(&id) {
-                    row.state = DownloadState::Finished { path, decrypted };
+                    row.state = DownloadState::Finished {
+                        path,
+                        decrypted,
+                        cleanup_warning,
+                    };
                     row.received = row.total;
                     row.speed = 0.0;
                 }
@@ -361,25 +382,38 @@ impl AppView {
                     row.speed = 0.0;
                 }
             }
-            UiEvent::Paused(paused) => {
-                for row in &mut self.rows {
-                    if matches!(
-                        row.state,
-                        DownloadState::Downloading | DownloadState::Paused
-                    ) {
-                        row.state = if paused {
-                            DownloadState::Paused
-                        } else {
-                            DownloadState::Downloading
-                        };
-                    }
-                }
-            }
+            UiEvent::TaskChanged { id } => self.sync_task_state(&id),
             UiEvent::QueueDone => {
                 self.busy = false;
                 self.download_control = None;
             }
             UiEvent::Message(message) => self.status = message,
+        }
+    }
+
+    fn sync_task_state(&mut self, id: &str) {
+        let state = self
+            .download_control
+            .as_ref()
+            .and_then(|queue| queue.task_state(id));
+        if let Some(state) = state
+            && let Some(row) = self.row_mut(id)
+        {
+            row.state = match state {
+                TaskState::Queued => DownloadState::Queued,
+                TaskState::Downloading => DownloadState::Downloading,
+                TaskState::Paused => DownloadState::Paused,
+                TaskState::Exporting => DownloadState::Exporting,
+            };
+            if row.state != DownloadState::Downloading {
+                row.speed = 0.0;
+            }
+        }
+    }
+
+    fn sync_queue_states(&mut self) {
+        for id in self.queued_download_ids.clone() {
+            self.sync_task_state(&id);
         }
     }
 

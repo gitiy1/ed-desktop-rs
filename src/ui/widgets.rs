@@ -1,6 +1,67 @@
 use super::*;
 
 impl AppView {
+    pub(super) fn setting_toggle(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        description: Option<&'static str>,
+        enabled: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        let palette = self.palette();
+        div()
+            .id(id)
+            .debug_selector(|| id.to_string())
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .py_1()
+            .cursor_pointer()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.))
+                    .gap_1()
+                    .child(div().text_sm().child(label))
+                    .children(
+                        description
+                            .map(|text| div().text_xs().text_color(palette.secondary).child(text)),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(52.))
+                    .h(px(30.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(if enabled {
+                        palette.accent
+                    } else {
+                        palette.button
+                    })
+                    .border_1()
+                    .border_color(if enabled {
+                        palette.accent
+                    } else {
+                        palette.border
+                    })
+                    .text_sm()
+                    .text_color(if enabled {
+                        palette.on_accent
+                    } else {
+                        palette.secondary
+                    })
+                    .child(self.text(if enabled { Text::On } else { Text::Off })),
+            )
+            .on_click(on_click)
+    }
+
     pub(super) fn settings_section(
         &self,
         title: &'static str,
