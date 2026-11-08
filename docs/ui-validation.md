@@ -14,6 +14,10 @@ The live account test used the configured `.env` credentials, logged in, loaded 
 
 Linux release and Windows test-target compilation were checked locally. The repository's GitHub Actions matrix remains responsible for native Windows and macOS builds; neither platform was run interactively in this environment.
 
+CI portability follow-up (2026-11-09): the pause/resume test now measures readable file bytes instead of directory-entry metadata, which can remain stale on Windows while a writer is open. It still asserts a partial download, no additional bytes during the pause, and byte-for-byte equality after resume. `cargo nextest run --offline --locked` passed all 29 regular tests; the targeted pause/resume stress run passed 30/30 iterations. Windows target compilation, Clippy, actionlint, and shell syntax checks passed locally. Windows native execution still needs its next CI run.
+
+The macOS job uses the ARM64 `macos-15` image. Packaging emits an ad-hoc-signed `.app`, a ZIP preserving the app's permissions, and a DMG containing the app plus an Applications shortcut. Local packaging orchestration was checked with Apple CLI commands mocked, including bundle metadata, versioning, permissions, archive layout, and paths containing spaces. The workflow runs actual `lipo`, `plutil`, `codesign`, `unzip`, and `hdiutil` checks on macOS. Native signing/DMG creation has not been executed on the local Linux host. Checkout and artifact upload use their Node 24 v6 actions.
+
 - [Library](screenshots/library.png)
 - [Paused downloads in Chinese](screenshots/paused-zh.png)
 - [Settings in Chinese](screenshots/settings-zh.png)

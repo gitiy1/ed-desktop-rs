@@ -22,7 +22,18 @@ Export names use the fetched title and author, such as `书名 - 作者.epub` an
 
 The interface follows the system language and appearance by default and supports English, Simplified Chinese, Light, and Dark modes. In System theme mode, GPUI's window-appearance event updates the palette when the OS theme changes; manual theme choices stay fixed across system changes. Proxy mode defaults to system settings, with manual HTTP and SOCKS5 options. System mode reads static proxy settings supported by the OS integration and falls back to `HTTP_PROXY`/`HTTPS_PROXY` environment variables. PAC files and authenticated proxy URLs are not supported; enter proxy endpoints as `host:port`.
 
-Run `cargo test --locked` for the GPUI interaction tests and network/DRM unit tests. The UI test drives real GPUI mouse and keyboard events through the navigation, account, settings, and download controls at the default 1180 x 820 window size.
+The macOS ARM64 CI artifact contains the raw binary, `endao-desktop-macos-arm64.app.zip`, and `endao-desktop-macos-arm64.dmg`. Extracting the ZIP produces `Endao Books.app` with its executable permissions preserved. The DMG contains the app and a shortcut to Applications for drag-and-drop installation. Packaging validates the ARM64 architecture, bundle metadata, ad-hoc signature, ZIP, and DMG. Developer ID signing and notarization require the distributor's Apple credentials and are left for release publishing.
+
+To build and package locally on macOS, run:
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=12.0 cargo build --release --locked
+sh scripts/package_macos.sh target/release
+```
+
+The bundle and archives are written to `target/release`. GitHub Actions uses the Node 24 versions `actions/checkout@v6` and `actions/upload-artifact@v6`.
+
+Run `cargo test --locked` or `cargo nextest run --locked` for the GPUI interaction tests and network/DRM unit tests. Nextest is useful for faster local iteration and parallel test execution. The UI test drives real GPUI mouse and keyboard events through the navigation, account, settings, and download controls at the default 1180 x 820 window size.
 
 For a native preview with synthetic books and no network requests or saved settings, run `cargo run --locked -- --demo library`. Other demo start pages are `downloads`, `settings`, and `login`. Demo mode skips `.env` loading and clears any inherited account values before rendering. On Hyprland versions with the Lua dispatcher API, `python3 scripts/ui_smoke_hyprland.py --binary target/release/endao-desktop` exercises selection, pause/resume, language switching and sign out on the actual Wayland renderer. It uses `hyprctl` and `grim`, captures only its own demo window, and restores focus and pointer position afterward.
 
