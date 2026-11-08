@@ -10,7 +10,7 @@ Install Rust stable and the native desktop build dependencies for your platform,
 cargo build --release --locked
 ```
 
-Linux needs the X11/Wayland, XKB, fontconfig, and OpenGL development packages. The GitHub Actions workflow builds release binaries on Ubuntu, macOS, and Windows.
+Linux needs the X11/Wayland, XKB, fontconfig, and OpenGL development packages. The GitHub Actions workflow builds release binaries on Ubuntu, macOS, and Windows. The macOS job uses the Apple Silicon `macos-15` runner, verifies the binary's ARM64 architecture before upload, and publishes it as `endao-desktop-macos-arm64`.
 
 ## Use
 
