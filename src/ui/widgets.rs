@@ -232,26 +232,13 @@ impl AppView {
     pub(super) fn input_field(
         &self,
         spec: InputFieldSpec,
-        on_mouse_down: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.palette();
-        let has_value = !spec.value.is_empty();
-        let mut shown = if !has_value {
-            spec.placeholder.to_string()
-        } else if spec.masked {
-            "•".repeat(spec.value.chars().count())
-        } else {
-            spec.value
-        };
-        if spec.focused && has_value {
-            let byte_index = char_to_byte_index(&shown, spec.cursor);
-            shown.insert(byte_index, '|');
-        }
-        let shown_color = if !has_value {
-            palette.muted
-        } else {
-            palette.text
-        };
+        let input = self.inputs[spec.field.index()].clone();
+        input.update(cx, |input, cx| {
+            input.configure(spec.placeholder, palette, cx)
+        });
         div()
             .flex()
             .flex_col()
@@ -265,61 +252,14 @@ impl AppView {
                 px(100.)
             })
             .gap_1()
-            .children(if spec.label.is_empty() {
-                None
-            } else {
-                Some(
-                    div()
-                        .h(px(18.))
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(palette.secondary)
-                        .child(spec.label),
-                )
-            })
-            .child(
+            .children((!spec.label.is_empty()).then(|| {
                 div()
-                    .id((
-                        "field",
-                        match spec.field {
-                            FocusedField::Email => 0usize,
-                            FocusedField::Password => 1,
-                            FocusedField::Output => 2,
-                            FocusedField::Workers => 3,
-                            FocusedField::ProxyAddress => 4,
-                            FocusedField::Search => 5,
-                        },
-                    ))
-                    .debug_selector(|| {
-                        format!(
-                            "field-{}",
-                            match spec.field {
-                                FocusedField::Email => 0,
-                                FocusedField::Password => 1,
-                                FocusedField::Output => 2,
-                                FocusedField::Workers => 3,
-                                FocusedField::ProxyAddress => 4,
-                                FocusedField::Search => 5,
-                            }
-                        )
-                    })
-                    .h(px(38.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(if spec.focused {
-                        palette.focus
-                    } else {
-                        palette.border
-                    })
-                    .bg(palette.input)
-                    .text_sm()
-                    .overflow_hidden()
-                    .text_color(shown_color)
-                    .child(shown)
-                    .on_click(on_mouse_down),
-            )
+                    .h(px(18.))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(palette.secondary)
+                    .child(spec.label)
+            }))
+            .child(input)
     }
 }

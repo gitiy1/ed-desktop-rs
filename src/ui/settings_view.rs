@@ -20,15 +20,9 @@ impl AppView {
                             InputFieldSpec {
                                 field: FocusedField::Output,
                                 label: self.text(Text::SaveTo),
-                                value: self.output_text.clone(),
                                 placeholder: self.text(Text::FolderPlaceholder),
-                                focused: self.focused_field == FocusedField::Output,
-                                cursor: self.cursor,
-                                masked: false,
                             },
-                            cx.listener(|this, _, window, cx| {
-                                this.click_field(FocusedField::Output, window, cx)
-                            }),
+                            cx,
                         ))
                         .child(self.button(
                             self.text(Text::Browse),
@@ -152,16 +146,9 @@ impl AppView {
                                             InputFieldSpec {
                                                 field: FocusedField::Workers,
                                                 label: self.text(Text::Workers),
-                                                value: self.workers_text.clone(),
                                                 placeholder: "4",
-                                                focused: self.focused_field
-                                                    == FocusedField::Workers,
-                                                cursor: self.cursor,
-                                                masked: false,
                                             },
-                                            cx.listener(|this, _, window, cx| {
-                                                this.click_field(FocusedField::Workers, window, cx)
-                                            }),
+                                            cx,
                                         )
                                     },
                                 )),
@@ -256,16 +243,9 @@ impl AppView {
                                         InputFieldSpec {
                                             field: FocusedField::ProxyAddress,
                                             label: self.text(Text::ProxyAddress),
-                                            value: self.proxy_address.clone(),
                                             placeholder: self.text(Text::ProxyAddressPlaceholder),
-                                            focused: self.focused_field
-                                                == FocusedField::ProxyAddress,
-                                            cursor: self.cursor,
-                                            masked: false,
                                         },
-                                        cx.listener(|this, _, window, cx| {
-                                            this.click_field(FocusedField::ProxyAddress, window, cx)
-                                        }),
+                                        cx,
                                     )),
                             )
                         } else {

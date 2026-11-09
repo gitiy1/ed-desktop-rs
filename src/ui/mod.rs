@@ -1,6 +1,7 @@
 mod actions;
 mod demo;
 mod file_actions;
+mod input;
 mod jobs;
 mod settings_view;
 mod shell;
@@ -23,10 +24,11 @@ use crate::theme::{Palette, ThemePreference};
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
 use gpui::{
-    App, Application, Bounds, ClickEvent, Context, FocusHandle, IntoElement, KeyDownEvent, Render,
+    App, Application, Bounds, ClickEvent, Context, Entity, FocusHandle, IntoElement, Render,
     SharedString, Styled, Window, WindowAppearance, WindowBounds, WindowOptions, div, prelude::*,
     px, relative, rgb, size,
 };
+use input::{InputEvent, TextInput};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +42,20 @@ enum FocusedField {
     Workers,
     ProxyAddress,
     Search,
+}
+
+impl FocusedField {
+    const ALL: [Self; 6] = [
+        Self::Email,
+        Self::Password,
+        Self::Output,
+        Self::Workers,
+        Self::ProxyAddress,
+        Self::Search,
+    ];
+    fn index(self) -> usize {
+        self as usize
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -139,11 +155,7 @@ impl DownloadState {
 struct InputFieldSpec {
     field: FocusedField,
     label: &'static str,
-    value: String,
     placeholder: &'static str,
-    focused: bool,
-    cursor: usize,
-    masked: bool,
 }
 
 impl BookRow {
@@ -228,8 +240,9 @@ pub struct AppView {
     download_control: Option<Arc<DownloadQueue>>,
     status: String,
     focused_field: FocusedField,
-    cursor: usize,
-    select_all: bool,
+    inputs: [Entity<TextInput>; 6],
+    _input_subscriptions: Vec<gpui::Subscription>,
+    pending_input_focus: Option<FocusedField>,
     focus_handle: FocusHandle,
     events_tx: Sender<(u64, UiEvent)>,
     events_rx: Receiver<(u64, UiEvent)>,
@@ -282,9 +295,38 @@ impl AppView {
         let settings = settings::load();
         let status = i18n::text(settings.language.resolve(), Text::SignInPrompt).to_string();
         let (events_tx, events_rx) = async_channel::unbounded();
+        let email = std::env::var("ED_EMAIL").unwrap_or_default();
+        let password = std::env::var("ED_PASSWORD").unwrap_or_default();
+        let values = [
+            email.clone(),
+            password.clone(),
+            settings.output_directory.to_string_lossy().into_owned(),
+            settings.workers.to_string(),
+            settings.proxy.address.clone(),
+            String::new(),
+        ];
+        let inputs = std::array::from_fn(|index| {
+            cx.new(|cx| {
+                TextInput::new(
+                    values[index].clone(),
+                    index,
+                    index == FocusedField::Password.index(),
+                    index == FocusedField::Workers.index(),
+                    cx,
+                )
+            })
+        });
+        let input_subscriptions = FocusedField::ALL
+            .iter()
+            .map(|&field| {
+                cx.subscribe(&inputs[field.index()], move |this, _, event, cx| {
+                    this.input_event(field, event, cx)
+                })
+            })
+            .collect();
         Self {
-            email: std::env::var("ED_EMAIL").unwrap_or_default(),
-            password: std::env::var("ED_PASSWORD").unwrap_or_default(),
+            email,
+            password,
             output_text: settings.output_directory.to_string_lossy().into_owned(),
             workers_text: settings.workers.to_string(),
             proxy_address: settings.proxy.address.clone(),
@@ -297,10 +339,9 @@ impl AppView {
             download_control: None,
             status,
             focused_field: FocusedField::Email,
-            cursor: std::env::var("ED_EMAIL")
-                .map(|value| value.chars().count())
-                .unwrap_or(0),
-            select_all: false,
+            inputs,
+            _input_subscriptions: input_subscriptions,
+            pending_input_focus: None,
             focus_handle: cx.focus_handle(),
             events_tx,
             events_rx,
@@ -331,7 +372,7 @@ impl AppView {
                 if view
                     .update(cx, |this, cx| {
                         if this.epoch == epoch {
-                            this.handle_event(event);
+                            this.handle_event(event, cx);
                         }
                         cx.notify();
                     })
@@ -344,14 +385,14 @@ impl AppView {
         .detach();
     }
 
-    fn handle_event(&mut self, event: UiEvent) {
+    fn handle_event(&mut self, event: UiEvent, cx: &mut Context<Self>) {
         match event {
             UiEvent::LoginDone(Ok((session, books))) => {
                 self.session = Some(session);
                 self.password.clear();
+                self.sync_input(FocusedField::Password, cx);
                 self.focused_field = FocusedField::Search;
-                self.cursor = 0;
-                self.select_all = false;
+                self.pending_input_focus = Some(FocusedField::Search);
                 self.replace_books(books);
                 self.busy = false;
                 self.page = ActivePage::Library;
@@ -508,12 +549,4 @@ fn format_bytes(value: u64) -> String {
 
 fn format_speed(value: f64) -> String {
     format!("{}/s", format_bytes(value.max(0.0) as u64))
-}
-
-fn char_to_byte_index(value: &str, character_index: usize) -> usize {
-    value
-        .char_indices()
-        .nth(character_index)
-        .map(|(byte_index, _)| byte_index)
-        .unwrap_or(value.len())
 }

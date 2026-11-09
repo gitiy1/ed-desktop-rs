@@ -1,131 +1,11 @@
 use super::*;
 
 impl AppView {
-    pub(super) fn click_field(
-        &mut self,
-        field: FocusedField,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.focused_field = field;
-        self.cursor = self.current_value().chars().count();
-        self.select_all = false;
-        window.focus(&self.focus_handle);
-        cx.notify();
+    pub(super) fn input_is_composing(&self, cx: &App) -> bool {
+        self.inputs[self.focused_field.index()]
+            .read(cx)
+            .is_composing()
     }
-
-    pub(super) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.to_ascii_lowercase();
-        if !self.visible_fields().contains(&self.focused_field) {
-            return;
-        }
-        if event.keystroke.modifiers.secondary() {
-            match key.as_str() {
-                "a" => {
-                    self.cursor = self.current_value().chars().count();
-                    self.select_all = true;
-                    cx.notify();
-                    return;
-                }
-                "v" => {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.insert_text(&text);
-                        self.sync_settings();
-                        cx.notify();
-                    }
-                    return;
-                }
-                _ => {}
-            }
-        }
-        match key.as_str() {
-            "backspace" => {
-                self.delete_selection_or_char(false);
-                self.sync_settings();
-                cx.notify();
-                return;
-            }
-            "delete" => {
-                self.delete_selection_or_char(true);
-                self.sync_settings();
-                cx.notify();
-                return;
-            }
-            "left" | "arrowleft" => {
-                self.cursor = if self.select_all {
-                    0
-                } else {
-                    self.cursor.saturating_sub(1)
-                };
-                self.select_all = false;
-                cx.notify();
-                return;
-            }
-            "right" | "arrowright" => {
-                self.cursor = if self.select_all {
-                    self.current_value().chars().count()
-                } else {
-                    (self.cursor + 1).min(self.current_value().chars().count())
-                };
-                self.select_all = false;
-                cx.notify();
-                return;
-            }
-            "home" => {
-                self.cursor = 0;
-                self.select_all = false;
-                cx.notify();
-                return;
-            }
-            "end" => {
-                self.cursor = self.current_value().chars().count();
-                self.select_all = false;
-                cx.notify();
-                return;
-            }
-            "tab" => {
-                let fields = self.visible_fields();
-                if fields.is_empty() {
-                    return;
-                }
-                let index = fields
-                    .iter()
-                    .position(|field| *field == self.focused_field)
-                    .unwrap_or(0);
-                let next = if event.keystroke.modifiers.shift {
-                    index.checked_sub(1).unwrap_or(fields.len() - 1)
-                } else {
-                    (index + 1) % fields.len()
-                };
-                self.focused_field = fields[next];
-                self.cursor = self.current_value().chars().count();
-                self.select_all = false;
-                cx.notify();
-                return;
-            }
-            "enter" if self.focused_field == FocusedField::Password => {
-                self.start_login(cx);
-                return;
-            }
-            _ => {}
-        }
-        if event.keystroke.modifiers.control
-            || event.keystroke.modifiers.platform
-            || event.keystroke.modifiers.alt
-        {
-            return;
-        }
-        if let Some(text) = event.keystroke.key_char.as_ref() {
-            let text: &str = text.as_ref();
-            if text.chars().any(|character| character.is_control()) {
-                return;
-            }
-            self.insert_text(text);
-            self.sync_settings();
-            cx.notify();
-        }
-    }
-
     pub(super) fn visible_fields(&self) -> Vec<FocusedField> {
         match self.page {
             ActivePage::Library if self.session.is_none() => {
@@ -146,8 +26,8 @@ impl AppView {
         }
     }
 
-    pub(super) fn current_value(&self) -> &str {
-        match self.focused_field {
+    pub(super) fn field_value(&self, field: FocusedField) -> &str {
+        match field {
             FocusedField::Email => &self.email,
             FocusedField::Password => &self.password,
             FocusedField::Output => &self.output_text,
@@ -157,59 +37,55 @@ impl AppView {
         }
     }
 
-    pub(super) fn current_value_mut(&mut self) -> &mut String {
-        match self.focused_field {
-            FocusedField::Email => &mut self.email,
-            FocusedField::Password => &mut self.password,
-            FocusedField::Output => &mut self.output_text,
-            FocusedField::Workers => &mut self.workers_text,
-            FocusedField::ProxyAddress => &mut self.proxy_address,
-            FocusedField::Search => &mut self.search_text,
-        }
+    pub(super) fn sync_input(&self, field: FocusedField, cx: &mut Context<Self>) {
+        let text = self.field_value(field).to_string();
+        self.inputs[field.index()].update(cx, |input, cx| input.set_text(text, cx));
     }
 
-    pub(super) fn insert_text(&mut self, text: &str) {
-        if self.focused_field == FocusedField::Workers
-            && !text.chars().all(|character| character.is_ascii_digit())
-        {
-            return;
-        }
-        let selected = self.select_all;
-        let cursor = self.cursor.min(self.current_value().chars().count());
-        self.cursor = cursor;
-        let value = self.current_value_mut();
-        if selected {
-            value.clear();
-        }
-        let byte_index = char_to_byte_index(value, if selected { 0 } else { cursor });
-        value.insert_str(byte_index, text);
-        self.cursor = if selected { 0 } else { cursor } + text.chars().count();
-        self.select_all = false;
-    }
-
-    pub(super) fn delete_selection_or_char(&mut self, forward: bool) {
-        if self.select_all {
-            self.current_value_mut().clear();
-            self.cursor = 0;
-            self.select_all = false;
-            return;
-        }
-        let cursor = self.cursor.min(self.current_value().chars().count());
-        self.cursor = cursor;
-        let value = self.current_value_mut();
-        let length = value.chars().count();
-        if forward {
-            if cursor < length {
-                let start = char_to_byte_index(value, cursor);
-                let end = char_to_byte_index(value, cursor + 1);
-                value.replace_range(start..end, "");
+    pub(super) fn input_event(
+        &mut self,
+        field: FocusedField,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Changed(text) => {
+                match field {
+                    FocusedField::Email => self.email = text.clone(),
+                    FocusedField::Password => self.password = text.clone(),
+                    FocusedField::Output => self.output_text = text.clone(),
+                    FocusedField::Workers => self.workers_text = text.clone(),
+                    FocusedField::ProxyAddress => self.proxy_address = text.clone(),
+                    FocusedField::Search => self.search_text = text.clone(),
+                }
+                if matches!(
+                    field,
+                    FocusedField::Output | FocusedField::Workers | FocusedField::ProxyAddress
+                ) {
+                    self.sync_settings();
+                }
             }
-        } else if cursor > 0 {
-            let start = char_to_byte_index(value, cursor - 1);
-            let end = char_to_byte_index(value, cursor);
-            value.replace_range(start..end, "");
-            self.cursor -= 1;
+            InputEvent::Focused => self.focused_field = field,
+            InputEvent::Tab(reverse) => {
+                let fields = self.visible_fields();
+                if !fields.is_empty() {
+                    let index = fields
+                        .iter()
+                        .position(|candidate| *candidate == field)
+                        .unwrap_or(0);
+                    let next = if *reverse {
+                        index.checked_sub(1).unwrap_or(fields.len() - 1)
+                    } else {
+                        (index + 1) % fields.len()
+                    };
+                    self.focused_field = fields[next];
+                    self.pending_input_focus = Some(fields[next]);
+                }
+            }
+            InputEvent::Submit if field == FocusedField::Password => self.start_login(cx),
+            InputEvent::Submit => {}
         }
+        cx.notify();
     }
 
     pub(super) fn sync_settings(&mut self) {
@@ -280,7 +156,7 @@ impl AppView {
 
     pub(super) fn start_login(&mut self, cx: &mut Context<Self>) {
         if self.demo {
-            self.load_demo_library();
+            self.load_demo_library(cx);
             self.page = ActivePage::Library;
             cx.notify();
             return;
@@ -313,7 +189,7 @@ impl AppView {
 
     pub(super) fn refresh_books(&mut self, cx: &mut Context<Self>) {
         if self.demo {
-            self.load_demo_library();
+            self.load_demo_library(cx);
             cx.notify();
             return;
         }
@@ -360,8 +236,7 @@ impl AppView {
         self.settings.experimental_parallel_downloads = enabled;
         if !enabled && self.focused_field == FocusedField::Workers {
             self.focused_field = FocusedField::Output;
-            self.cursor = self.output_text.chars().count();
-            self.select_all = false;
+            self.pending_input_focus = Some(FocusedField::Output);
         }
         self.save_settings();
         cx.notify();
@@ -381,9 +256,8 @@ impl AppView {
         };
         if let Some(field) = self.visible_fields().first() {
             self.focused_field = *field;
-            self.cursor = self.current_value().chars().count();
+            self.pending_input_focus = Some(*field);
         }
-        self.select_all = false;
         cx.notify();
     }
 
@@ -400,7 +274,14 @@ impl AppView {
         self.password.clear();
         self.search_text.clear();
         self.focused_field = FocusedField::Email;
-        self.cursor = 0;
+        for field in [
+            FocusedField::Email,
+            FocusedField::Password,
+            FocusedField::Search,
+        ] {
+            self.sync_input(field, cx);
+        }
+        self.pending_input_focus = Some(FocusedField::Email);
         self.page = ActivePage::Library;
         self.status = self.text(Text::SignInPrompt).to_string();
         cx.notify();
@@ -453,9 +334,13 @@ impl AppView {
         if let Some(folder) = folder {
             self.output_text = folder.to_string_lossy().into_owned();
             self.focused_field = FocusedField::Output;
-            self.cursor = self.output_text.chars().count();
-            self.select_all = false;
-            window.focus(&self.focus_handle);
+            self.sync_input(FocusedField::Output, cx);
+            window.focus(
+                &self.inputs[FocusedField::Output.index()]
+                    .read(cx)
+                    .focus_handle
+                    .clone(),
+            );
             self.sync_settings();
             cx.notify();
         }

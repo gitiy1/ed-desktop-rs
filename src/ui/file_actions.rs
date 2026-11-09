@@ -48,7 +48,7 @@ impl AppView {
             let result = operation.await;
             let _ = view.update(cx, |this, cx| {
                 if this.epoch == epoch {
-                    this.handle_event(UiEvent::FileDeleted { id, path, result });
+                    this.handle_event(UiEvent::FileDeleted { id, path, result }, cx);
                     cx.notify();
                 }
             });

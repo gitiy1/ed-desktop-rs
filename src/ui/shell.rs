@@ -3,6 +3,9 @@ use super::*;
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_listener(window, cx);
+        if let Some(field) = self.pending_input_focus.take() {
+            window.focus(&self.inputs[field.index()].read(cx).focus_handle.clone());
+        }
         let palette = self.palette();
         let account_label = self
             .session
@@ -31,7 +34,19 @@ impl Render for AppView {
             .debug_selector(|| "app-root".to_string())
             .size_full()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event, _, cx| this.handle_key(event, cx)))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                // Buttons may move focus back to the form container. Tab still
+                // advances through the visible fields from that position.
+                if event.keystroke.key == "tab" && !this.input_is_composing(cx) {
+                    this.input_event(
+                        this.focused_field,
+                        &InputEvent::Tab(event.keystroke.modifiers.shift),
+                        cx,
+                    );
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
             .flex()
             .bg(palette.background)
             .text_color(palette.text)

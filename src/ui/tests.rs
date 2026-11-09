@@ -254,7 +254,7 @@ fn task_pause_skips_to_next_book_and_clear_completed_preserves_exports(cx: &mut 
                 cleanup_warning: None,
             };
         }
-        view.handle_event(UiEvent::QueueDone);
+        view.handle_event(UiEvent::QueueDone, cx);
         cx.notify();
     });
     click(cx, "Clear completed");
@@ -277,9 +277,12 @@ fn single_thread_and_source_retention_settings_are_explicit_and_localized(cx: &m
     click(cx, "field-3");
     // GPUI maps secondary to Command on macOS and Control on Windows/Linux.
     cx.simulate_keystrokes("secondary-a");
-    view.update(cx, |view, _| {
+    view.update(cx, |view, cx| {
         assert!(
-            view.select_all,
+            !view.inputs[FocusedField::Workers.index()]
+                .read(cx)
+                .selection()
+                .is_empty(),
             "the native select-all shortcut must select the field"
         );
     });
@@ -309,6 +312,97 @@ fn single_thread_and_source_retention_settings_are_explicit_and_localized(cx: &m
         assert_eq!(view.text(Text::SingleThread), "单线程");
         assert_eq!(view.text(Text::ClearCompleted), "清除已完成");
     });
+}
+
+#[gpui::test]
+fn chinese_ime_commits_update_search_and_settings_without_saving_preedit(cx: &mut TestAppContext) {
+    use gpui::{ElementInputHandler, InputHandler};
+    let (view, cx) = cx.add_window_view(|_, cx| AppView::demo("library", cx));
+    cx.simulate_resize(size(px(1180.), px(820.)));
+    click(cx, "field-5");
+    let search = view.read_with(cx, |view, _| {
+        view.inputs[FocusedField::Search.index()].clone()
+    });
+    cx.update(|window, cx| {
+        let mut handler = ElementInputHandler::new(Bounds::default(), search);
+        handler.replace_and_mark_text_in_range(None, "zhongwen", Some(8..8), window, cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(
+            view.search_text.is_empty(),
+            "preedit must not filter the library"
+        )
+    });
+    cx.update(|window, cx| {
+        let search = view.read(cx).inputs[FocusedField::Search.index()].clone();
+        ElementInputHandler::new(Bounds::default(), search)
+            .replace_text_in_range(None, "中文", window, cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| assert_eq!(view.search_text, "中文"));
+    click(cx, "nav-settings");
+    click(cx, "field-2");
+    cx.simulate_keystrokes("secondary-a");
+    let original = view.read_with(cx, |view, _| view.settings.output_directory.clone());
+    cx.update(|window, cx| {
+        let input = view.read(cx).inputs[FocusedField::Output.index()].clone();
+        ElementInputHandler::new(Bounds::default(), input).replace_and_mark_text_in_range(
+            None,
+            "shuku",
+            Some(5..5),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.settings.output_directory, original)
+    });
+    cx.update(|window, cx| {
+        let input = view.read(cx).inputs[FocusedField::Output.index()].clone();
+        ElementInputHandler::new(Bounds::default(), input).replace_text_in_range(
+            None,
+            "中文书库/已购书籍",
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.output_text, "中文书库/已购书籍");
+        assert_eq!(
+            view.settings.output_directory,
+            PathBuf::from("中文书库/已购书籍")
+        );
+    });
+    click(cx, "Sign out");
+    click(cx, "field-1");
+    cx.update(|window, cx| {
+        let input = view.read(cx).inputs[FocusedField::Password.index()].clone();
+        ElementInputHandler::new(Bounds::default(), input).replace_and_mark_text_in_range(
+            None,
+            "mima",
+            Some(4..4),
+            window,
+            cx,
+        );
+    });
+    cx.refresh().unwrap();
+    cx.simulate_keystrokes("enter");
+    view.read_with(cx, |view, _| {
+        assert!(
+            view.session.is_none(),
+            "IME candidate confirmation must not submit login"
+        )
+    });
+    cx.update(|window, cx| {
+        let input = view.read(cx).inputs[FocusedField::Password.index()].clone();
+        ElementInputHandler::new(Bounds::default(), input)
+            .replace_text_in_range(None, "密码", window, cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| assert_eq!(view.password, "密码"));
 }
 
 #[gpui::test]

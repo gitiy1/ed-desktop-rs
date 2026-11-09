@@ -1584,6 +1584,7 @@ dependencies = [
  "sysproxy",
  "tempfile",
  "trash",
+ "unicode-segmentation",
  "uuid",
  "winreg 0.10.1",
  "xmltree",

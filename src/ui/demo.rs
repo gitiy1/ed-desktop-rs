@@ -64,14 +64,17 @@ impl AppView {
             view.download_control = Some(control);
             view.busy = true;
         }
+        for field in FocusedField::ALL {
+            view.sync_input(field, cx);
+        }
         view
     }
 
-    pub(super) fn load_demo_library(&mut self) {
+    pub(super) fn load_demo_library(&mut self, cx: &mut Context<Self>) {
         self.password.clear();
         self.focused_field = FocusedField::Search;
-        self.cursor = 0;
-        self.select_all = false;
+        self.sync_input(FocusedField::Password, cx);
+        self.pending_input_focus = Some(FocusedField::Search);
         self.session = Some(Session {
             email: "reader@example.test".to_string(),
             access_token: String::new(),

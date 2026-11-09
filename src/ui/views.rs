@@ -263,29 +263,17 @@ impl AppView {
                         InputFieldSpec {
                             field: FocusedField::Email,
                             label: self.text(Text::Email),
-                            value: self.email.clone(),
                             placeholder: self.text(Text::EmailPlaceholder),
-                            focused: self.focused_field == FocusedField::Email,
-                            cursor: self.cursor,
-                            masked: false,
                         },
-                        cx.listener(|this, _, window, cx| {
-                            this.click_field(FocusedField::Email, window, cx)
-                        }),
+                        cx,
                     ))
                     .child(self.input_field(
                         InputFieldSpec {
                             field: FocusedField::Password,
                             label: self.text(Text::Password),
-                            value: self.password.clone(),
                             placeholder: self.text(Text::PasswordPlaceholder),
-                            focused: self.focused_field == FocusedField::Password,
-                            cursor: self.cursor,
-                            masked: true,
                         },
-                        cx.listener(|this, _, window, cx| {
-                            this.click_field(FocusedField::Password, window, cx)
-                        }),
+                        cx,
                     ))
                     .child(self.button(
                         self.text(Text::SignIn),
@@ -322,15 +310,9 @@ impl AppView {
                         InputFieldSpec {
                             field: FocusedField::Search,
                             label: "",
-                            value: self.search_text.clone(),
                             placeholder: self.text(Text::SearchBooks),
-                            focused: self.focused_field == FocusedField::Search,
-                            cursor: self.cursor,
-                            masked: false,
                         },
-                        cx.listener(|this, _, window, cx| {
-                            this.click_field(FocusedField::Search, window, cx)
-                        }),
+                        cx,
                     ))
                     .child(self.button(
                         self.text(Text::Refresh),
