@@ -6,6 +6,7 @@ impl AppView {
         let mut view = Self::new(cx);
         view.demo = true;
         view.persist_settings = false;
+        view.file_actions = Arc::new(DemoFileActions);
         view.email.clear();
         view.password.clear();
         view.proxy_address.clear();
@@ -92,18 +93,23 @@ impl AppView {
         let selected: Vec<_> = self
             .rows
             .iter_mut()
-            .filter(|row| row.selected)
+            .filter(|row| row.selected && !row.state.is_active() && !row.deleting)
             .map(|row| {
                 row.state = DownloadState::Queued;
                 row.total = 0;
                 row.received = 0;
+                row.file_action_error = None;
                 row.book.id()
             })
             .collect();
         if selected.is_empty() {
             self.status = self.text(Text::SelectBooks).to_string();
         } else {
-            if let Some(row) = self.rows.iter_mut().find(|row| row.selected) {
+            if let Some(row) = self
+                .rows
+                .iter_mut()
+                .find(|row| selected.contains(&row.book.id()))
+            {
                 row.state = DownloadState::Downloading;
                 row.total = 4_800_000;
                 row.received = 1_920_000;
@@ -111,12 +117,7 @@ impl AppView {
             }
             self.queued_download_ids.extend(selected.iter().cloned());
             self.busy = true;
-            let queue = Arc::new(DownloadQueue::new(
-                self.rows
-                    .iter()
-                    .filter(|row| row.selected)
-                    .map(|row| row.book.id()),
-            ));
+            let queue = Arc::new(DownloadQueue::new(selected.iter().cloned()));
             if selected.len() > 1 {
                 let finished_id = selected.last().unwrap();
                 queue.finish(finished_id);
@@ -158,6 +159,20 @@ impl AppView {
             let _ = queue.try_next_task();
         }
         self.sync_queue_states();
+    }
+}
+
+// Demo controls exercise UI state without launching a file manager or touching
+// real exports. Native file operations are tested with isolated temp files.
+struct DemoFileActions;
+
+impl FileActions for DemoFileActions {
+    fn reveal(&self, _path: &std::path::Path, _cx: &App) -> Result<()> {
+        Ok(())
+    }
+
+    fn delete(&self, _path: &std::path::Path) -> Result<DeleteOutcome> {
+        Ok(DeleteOutcome::Trashed)
     }
 }
 

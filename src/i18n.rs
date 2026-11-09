@@ -116,6 +116,15 @@ pub enum Text {
     CleanupFailed,
     On,
     Off,
+    ShowInFolder,
+    DeleteFile,
+    DeletingFile,
+    MovedToTrash,
+    PermanentlyDeleted,
+    FileMissing,
+    RevealFailed,
+    DeleteFailed,
+    DeletePolicy,
 }
 
 pub fn text(locale: Locale, key: Text) -> &'static str {
@@ -208,6 +217,17 @@ pub fn text(locale: Locale, key: Text) -> &'static str {
         (Locale::English, Text::CleanupFailed) => "Exported; could not remove encrypted source",
         (Locale::English, Text::On) => "On",
         (Locale::English, Text::Off) => "Off",
+        (Locale::English, Text::ShowInFolder) => "Show in folder",
+        (Locale::English, Text::DeleteFile) => "Delete file",
+        (Locale::English, Text::DeletingFile) => "Deleting file…",
+        (Locale::English, Text::MovedToTrash) => "Moved to recycle bin",
+        (Locale::English, Text::PermanentlyDeleted) => "Permanently deleted",
+        (Locale::English, Text::FileMissing) => "File no longer exists",
+        (Locale::English, Text::RevealFailed) => "Could not show file",
+        (Locale::English, Text::DeleteFailed) => "Could not delete file",
+        (Locale::English, Text::DeletePolicy) => {
+            "Delete file moves the output to the recycle bin, or permanently deletes it if recycling fails."
+        }
         (Locale::SimplifiedChinese, Text::NotSignedIn) => "未登录",
         (Locale::SimplifiedChinese, Text::Email) => "邮箱",
         (Locale::SimplifiedChinese, Text::EmailPlaceholder) => "账号邮箱",
@@ -296,6 +316,17 @@ pub fn text(locale: Locale, key: Text) -> &'static str {
         (Locale::SimplifiedChinese, Text::CleanupFailed) => "已导出；加密原件清理失败",
         (Locale::SimplifiedChinese, Text::On) => "开",
         (Locale::SimplifiedChinese, Text::Off) => "关",
+        (Locale::SimplifiedChinese, Text::ShowInFolder) => "打开位置",
+        (Locale::SimplifiedChinese, Text::DeleteFile) => "删除文件",
+        (Locale::SimplifiedChinese, Text::DeletingFile) => "正在删除文件…",
+        (Locale::SimplifiedChinese, Text::MovedToTrash) => "已移至回收站",
+        (Locale::SimplifiedChinese, Text::PermanentlyDeleted) => "已永久删除",
+        (Locale::SimplifiedChinese, Text::FileMissing) => "文件已不存在",
+        (Locale::SimplifiedChinese, Text::RevealFailed) => "无法打开文件位置",
+        (Locale::SimplifiedChinese, Text::DeleteFailed) => "文件删除失败",
+        (Locale::SimplifiedChinese, Text::DeletePolicy) => {
+            "删除文件会将成品移至回收站；移入失败时会直接删除。"
+        }
     }
 }
 

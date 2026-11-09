@@ -1,5 +1,37 @@
 use super::*;
 use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point};
+use std::path::Path;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+
+struct TestFileActions {
+    revealed: Mutex<Vec<PathBuf>>,
+    deleted: Mutex<Vec<PathBuf>>,
+    recycled: PathBuf,
+    outcome: DeleteOutcome,
+    fail_delete: AtomicBool,
+}
+
+impl FileActions for TestFileActions {
+    fn reveal(&self, path: &Path, _cx: &App) -> Result<()> {
+        anyhow::ensure!(path.is_file(), "file missing");
+        self.revealed.lock().unwrap().push(path.to_path_buf());
+        Ok(())
+    }
+
+    fn delete(&self, path: &Path) -> Result<DeleteOutcome> {
+        self.deleted.lock().unwrap().push(path.to_path_buf());
+        anyhow::ensure!(!self.fail_delete.load(Ordering::Acquire), "file is locked");
+        match self.outcome {
+            DeleteOutcome::Trashed => std::fs::rename(path, &self.recycled)?,
+            DeleteOutcome::PermanentlyDeleted => std::fs::remove_file(path)?,
+            DeleteOutcome::AlreadyMissing => {}
+        }
+        Ok(self.outcome)
+    }
+}
 
 fn click(cx: &mut VisualTestContext, selector: &'static str) {
     for _ in 0..12 {
@@ -277,6 +309,160 @@ fn single_thread_and_source_retention_settings_are_explicit_and_localized(cx: &m
         assert_eq!(view.text(Text::SingleThread), "单线程");
         assert_eq!(view.text(Text::ClearCompleted), "清除已完成");
     });
+}
+
+#[gpui::test]
+fn completed_download_file_controls_reveal_delete_and_preserve_library(cx: &mut TestAppContext) {
+    for outcome in [
+        DeleteOutcome::Trashed,
+        DeleteOutcome::PermanentlyDeleted,
+        DeleteOutcome::AlreadyMissing,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("书名 - Author's Book.epub");
+        let source = directory.path().join("书名 - Author's Book.books.epub");
+        std::fs::write(&output, b"exported book").unwrap();
+        std::fs::write(&source, b"retained encrypted original").unwrap();
+        let backend = Arc::new(TestFileActions {
+            revealed: Mutex::new(Vec::new()),
+            deleted: Mutex::new(Vec::new()),
+            recycled: directory.path().join("recycled.epub"),
+            outcome,
+            fail_delete: AtomicBool::new(false),
+        });
+        let (view, cx) = cx.add_window_view(|_, cx| AppView::demo("downloads", cx));
+        cx.simulate_resize(size(px(960.), px(640.)));
+        view.update(cx, |view, cx| {
+            view.file_actions = backend.clone();
+            view.rows[2].state = DownloadState::Finished {
+                path: output.clone(),
+                decrypted: true,
+                cleanup_warning: None,
+            };
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        let row = cx.debug_bounds("book-row-2").unwrap();
+        for selector in ["reveal-file-2", "delete-file-2"] {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            assert!(bounds.left() >= row.left());
+            assert!(bounds.right() <= row.right());
+            assert!(bounds.top() >= row.top());
+            assert!(bounds.bottom() <= row.bottom());
+        }
+        click(cx, "reveal-file-2");
+        assert_eq!(*backend.revealed.lock().unwrap(), vec![output.clone()]);
+        // Removing a book externally produces a useful error without losing
+        // the record. Deletion can still clear the missing output state.
+        if outcome == DeleteOutcome::AlreadyMissing {
+            std::fs::remove_file(&output).unwrap();
+            click(cx, "reveal-file-2");
+            view.update(cx, |view, _| {
+                assert!(
+                    view.rows[2]
+                        .file_action_error
+                        .as_ref()
+                        .unwrap()
+                        .contains("Could not show file")
+                )
+            });
+        }
+        click(cx, "delete-file-2");
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert_eq!(view.rows[2].state, DownloadState::Deleted(outcome));
+            assert!(!view.rows[2].deleting);
+            assert!(view.rows[2].file_action_error.is_none());
+            assert_eq!(view.rows.len(), 6);
+            assert!(
+                view.busy,
+                "deleting a completed file must not stop other downloads"
+            );
+        });
+        assert_eq!(*backend.deleted.lock().unwrap(), vec![output.clone()]);
+        assert!(!output.exists());
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            b"retained encrypted original"
+        );
+        if outcome == DeleteOutcome::Trashed {
+            assert_eq!(std::fs::read(&backend.recycled).unwrap(), b"exported book");
+        }
+        click(cx, "Clear completed");
+        view.update(cx, |view, _| {
+            assert_eq!(view.queued_download_ids.len(), 2);
+            assert_eq!(view.rows.len(), 6);
+        });
+    }
+}
+
+#[gpui::test]
+fn file_deletion_errors_can_be_retried_and_inflight_deletion_cannot_be_queued_twice(
+    cx: &mut TestAppContext,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("finished.epub");
+    std::fs::write(&output, b"exported book").unwrap();
+    let backend = Arc::new(TestFileActions {
+        revealed: Mutex::new(Vec::new()),
+        deleted: Mutex::new(Vec::new()),
+        recycled: directory.path().join("recycled.epub"),
+        outcome: DeleteOutcome::Trashed,
+        fail_delete: AtomicBool::new(true),
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| AppView::demo("downloads", cx));
+    cx.simulate_resize(size(px(1180.), px(820.)));
+    view.update(cx, |view, cx| {
+        view.file_actions = backend.clone();
+        view.rows[2].state = DownloadState::Finished {
+            path: output.clone(),
+            decrypted: true,
+            cleanup_warning: None,
+        };
+        view.set_language(LanguagePreference::SimplifiedChinese, cx);
+    });
+    click(cx, "delete-file-2");
+    cx.run_until_parked();
+    view.update(cx, |view, _| {
+        assert!(matches!(view.rows[2].state, DownloadState::Finished { .. }));
+        assert!(!view.rows[2].deleting);
+        assert!(
+            view.rows[2]
+                .file_action_error
+                .as_ref()
+                .unwrap()
+                .contains("文件删除失败")
+        );
+    });
+    assert_eq!(std::fs::read(&output).unwrap(), b"exported book");
+    backend.fail_delete.store(false, Ordering::Release);
+    view.update(cx, |view, cx| {
+        view.delete_download("demo-3", cx);
+        view.delete_download("demo-3", cx);
+        assert!(view.rows[2].deleting);
+        view.clear_completed_downloads(cx);
+        assert!(view.queued_download_ids.contains("demo-3"));
+        view.rows[2].selected = true;
+        view.download_control = None;
+        view.busy = false;
+        view.start_downloads(cx);
+        assert!(view.rows[2].deleting);
+        assert!(matches!(view.rows[2].state, DownloadState::Finished { .. }));
+    });
+    cx.run_until_parked();
+    view.update(cx, |view, _| {
+        assert_eq!(
+            view.rows[2].state,
+            DownloadState::Deleted(DeleteOutcome::Trashed)
+        );
+        assert_eq!(view.rows[2].state.label(view.locale()), "已移至回收站");
+    });
+    assert_eq!(
+        backend.deleted.lock().unwrap().len(),
+        2,
+        "one failed attempt and one successful retry"
+    );
+    assert!(!output.exists());
 }
 
 #[gpui::test]

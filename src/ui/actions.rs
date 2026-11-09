@@ -438,7 +438,7 @@ impl AppView {
 
     pub(super) fn clear_completed_downloads(&mut self, cx: &mut Context<Self>) {
         for row in &self.rows {
-            if matches!(row.state, DownloadState::Finished { .. }) {
+            if row.state.is_completed() && !row.deleting {
                 self.queued_download_ids.remove(&row.book.id());
             }
         }
@@ -480,11 +480,12 @@ impl AppView {
         let books: Vec<Book> = self
             .rows
             .iter_mut()
-            .filter(|row| row.selected && !row.state.is_active())
+            .filter(|row| row.selected && !row.state.is_active() && !row.deleting)
             .map(|row| {
                 row.state = DownloadState::Queued;
                 row.received = 0;
                 row.total = 0;
+                row.file_action_error = None;
                 row.book.clone()
             })
             .collect();

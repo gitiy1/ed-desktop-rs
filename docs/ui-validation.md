@@ -32,6 +32,15 @@ The opt-in live test passed using the configured `.env` account: login, purchase
 
 The native Hyprland smoke script ran with the release binary and synthetic data. Captures were inspected for clear-completed, individual pause/resume, the active next book, global pause/resume, experimental parallel mode and its worker field, returning to single-thread mode, source-retention toggle, English/Chinese, dark/light, sign out, and the 960 × 640 layout. The script restored focus and pointer position. Linux release build, Clippy with `-D warnings`, Windows GNU test-target compilation, and actionlint passed. Native Windows/macOS execution remains for CI.
 
+Completed-file controls follow-up (2026-11-09): finished tasks now offer Show in folder and Delete file. GPUI handles native file-manager integration (Explorer/Finder, Linux desktop portal with a containing-folder fallback). The `trash` crate handles recycling. macOS explicitly uses NSFileManager so moving a file to Trash does not require Finder automation permission; Windows uses a fresh COM thread. If recycling fails, the app attempts `remove_file` and records permanent deletion. Missing files receive their own status, and failures preserve the completed record for retry. Direct deletion does not recurse into directories or follow a symlink to delete its target. Retained encrypted sources are unaffected.
+
+File operations are behind an injectable backend. GPUI mouse tests use temporary exports to verify the exact revealed/deleted path, recycle/direct-delete/missing outcomes, failures and retry, localized status, controls fitting inside a completed row at 960 × 640, preserved encrypted originals and library rows, active queue continuity, and exclusion of a deleting task from clearing/requeueing/duplicate deletion. Demo mode simulates OS file operations and never opens a file manager or deletes real files. Native screenshots show the controls and recycled status, with compact layout, dark/light, and language switching checked by the existing smoke script.
+
+Validation: `cargo test` and Nextest each passed 46 regular tests, with live service and native recycle tests excluded by default. The native Linux recycling test was run separately with an empty temporary XDG_DATA_HOME; it verified the moved file's contents and freedesktop `.trashinfo` recovery metadata. The entire test directory was removed afterward. Clippy with `-D warnings` passed for Linux and the Windows GNU test target; the Linux release build and Windows GNU test-target compilation passed. Native macOS/Windows file-manager and recycle-bin execution remains for platform testing.
+
+- [Completed-file actions](screenshots/download-file-actions.png)
+- [File moved to recycle bin](screenshots/download-file-deleted.png)
+
 - [Completed queue and per-task controls](screenshots/downloads-controls.png)
 - [Paused task with the next book downloading](screenshots/download-task-paused.png)
 - [Compact downloads](screenshots/downloads-compact.png)

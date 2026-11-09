@@ -101,6 +101,10 @@ def main():
             capture("selected")
             click(1064, 196)  # Start the synthetic queue.
             capture("downloads")
+            click(1080, 620)  # Show the completed demo export (simulated OS action).
+            capture("file-revealed")
+            click(1080, 654)  # Delete it; demo mode simulates recycling only.
+            capture("file-deleted")
             click(940, 129)  # Clear the synthetic completed entry.
             capture("completed-cleared")
             click(1080, 205)  # Pause just the first task; the next one starts.

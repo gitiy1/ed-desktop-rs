@@ -1,6 +1,7 @@
 mod api;
 mod downloader;
 mod export;
+mod file_actions;
 mod filenames;
 mod i18n;
 mod lcp;

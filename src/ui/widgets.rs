@@ -1,6 +1,36 @@
 use super::*;
 
 impl AppView {
+    pub(super) fn file_button(
+        &self,
+        id: &'static str,
+        index: usize,
+        label: &'static str,
+        destructive: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        let palette = self.palette();
+        div()
+            .id((id, index))
+            .debug_selector(move || format!("{id}-{index}"))
+            .w_full()
+            .h(px(30.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .bg(palette.button)
+            .text_color(if destructive {
+                palette.danger
+            } else {
+                palette.text
+            })
+            .text_xs()
+            .cursor_pointer()
+            .hover(move |style| style.bg(palette.button_hover))
+            .child(label)
+            .on_click(on_click)
+    }
     pub(super) fn setting_toggle(
         &self,
         id: &'static str,

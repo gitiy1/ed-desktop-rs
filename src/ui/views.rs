@@ -21,12 +21,17 @@ impl AppView {
                     return None;
                 }
                 let id = row.book.id();
-                let task_id = id.clone();
                 let cover = cover_color(&id);
                 let selected = row.selected;
                 let title = row.book.title();
                 let author = row.book.author();
-                let status = row.state.label(self.locale());
+                let status = if row.deleting {
+                    self.text(Text::DeletingFile).to_string()
+                } else {
+                    row.file_action_error
+                        .clone()
+                        .unwrap_or_else(|| row.state.label(self.locale()))
+                };
                 let progress = row.progress();
                 let progress_text = if row.total > 0 {
                     format!(
@@ -134,80 +139,68 @@ impl AppView {
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .text_xs()
-                                            .text_color(
-                                                if matches!(
-                                                    row.state,
-                                                    DownloadState::Finished {
-                                                        cleanup_warning: Some(_),
-                                                        ..
-                                                    }
-                                                ) {
-                                                    palette.paused
-                                                } else {
-                                                    palette.secondary
-                                                },
-                                            )
+                                            .text_color(if row.file_action_error.is_some() {
+                                                palette.danger
+                                            } else if matches!(
+                                                row.state,
+                                                DownloadState::Finished {
+                                                    cleanup_warning: Some(_),
+                                                    ..
+                                                }
+                                            ) {
+                                                palette.paused
+                                            } else {
+                                                palette.secondary
+                                            })
                                             .child(status),
                                     )
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .h(px(6.))
-                                            .rounded_md()
-                                            .bg(palette.progress_track)
-                                            .child(
+                                    .when(
+                                        !matches!(row.state, DownloadState::Deleted(_)),
+                                        |status| {
+                                            status.child(
                                                 div()
-                                                    .h_full()
-                                                    .w(relative(progress))
+                                                    .w_full()
+                                                    .h(px(6.))
                                                     .rounded_md()
-                                                    .bg(if row.state == DownloadState::Paused {
-                                                        palette.paused
-                                                    } else {
-                                                        palette.focus
-                                                    }),
-                                            ),
+                                                    .bg(palette.progress_track)
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .w(relative(progress))
+                                                            .rounded_md()
+                                                            .bg(
+                                                                if row.state
+                                                                    == DownloadState::Paused
+                                                                {
+                                                                    palette.paused
+                                                                } else {
+                                                                    palette.focus
+                                                                },
+                                                            ),
+                                                    ),
+                                            )
+                                        },
                                     )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .justify_between()
-                                            .text_xs()
-                                            .text_color(palette.secondary)
-                                            .child(progress_text)
-                                            .child(speed),
+                                    .when(
+                                        !matches!(row.state, DownloadState::Deleted(_)),
+                                        |status| {
+                                            status.child(
+                                                div()
+                                                    .flex()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .text_color(palette.secondary)
+                                                    .child(progress_text)
+                                                    .child(speed),
+                                            )
+                                        },
                                     ),
                             )
                         } else {
                             None
                         })
                         .children(if downloads_only {
-                            Some(div().w(px(88.)).flex_shrink_0().children(
-                                if matches!(
-                                    row.state,
-                                    DownloadState::Queued
-                                        | DownloadState::Downloading
-                                        | DownloadState::Paused
-                                ) {
-                                    Some(
-                                        div()
-                                            .id(("task-control", index))
-                                            .debug_selector(move || format!("task-control-{index}"))
-                                            .child(self.button(
-                                                if row.state == DownloadState::Paused {
-                                                    self.text(Text::Resume)
-                                                } else {
-                                                    self.text(Text::Pause)
-                                                },
-                                                false,
-                                                cx.listener(move |this, _, _, cx| {
-                                                    this.toggle_task_pause(&task_id, cx)
-                                                }),
-                                            )),
-                                    )
-                                } else {
-                                    None
-                                },
-                            ))
+                            Some(self.render_task_controls(row, index, cx))
                         } else {
                             None
                         }),
@@ -395,7 +388,8 @@ impl AppView {
             .is_some_and(|control| control.has_paused() && !control.has_unpaused());
         let has_completed = self.rows.iter().any(|row| {
             self.queued_download_ids.contains(&row.book.id())
-                && matches!(row.state, DownloadState::Finished { .. })
+                && row.state.is_completed()
+                && !row.deleting
         });
         let queue_label = match self.locale() {
             Locale::English => format!("{} books in this queue", self.queued_download_ids.len()),
@@ -499,5 +493,69 @@ impl AppView {
                     .child(self.text(Text::NoDownloads))
                     .into_any_element()
             })
+            .children(has_downloads.then(|| {
+                div()
+                    .px_5()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(palette.border)
+                    .text_xs()
+                    .text_color(palette.muted)
+                    .child(self.text(Text::DeletePolicy))
+            }))
+    }
+
+    fn render_task_controls(
+        &self,
+        row: &BookRow,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let id = row.book.id();
+        let controls = div().w(px(112.)).flex_shrink_0().flex().flex_col().gap_1();
+        if row.deleting {
+            return controls.child(
+                div()
+                    .text_xs()
+                    .text_color(self.palette().muted)
+                    .child(self.text(Text::DeletingFile)),
+            );
+        }
+        match row.state {
+            DownloadState::Queued | DownloadState::Downloading | DownloadState::Paused => controls
+                .child(
+                    div()
+                        .id(("task-control", index))
+                        .debug_selector(move || format!("task-control-{index}"))
+                        .child(self.button(
+                            if row.state == DownloadState::Paused {
+                                self.text(Text::Resume)
+                            } else {
+                                self.text(Text::Pause)
+                            },
+                            false,
+                            cx.listener(move |this, _, _, cx| this.toggle_task_pause(&id, cx)),
+                        )),
+                ),
+            DownloadState::Finished { .. } => {
+                let delete_id = id.clone();
+                controls
+                    .child(self.file_button(
+                        "reveal-file",
+                        index,
+                        self.text(Text::ShowInFolder),
+                        false,
+                        cx.listener(move |this, _, _, cx| this.reveal_download(&id, cx)),
+                    ))
+                    .child(self.file_button(
+                        "delete-file",
+                        index,
+                        self.text(Text::DeleteFile),
+                        true,
+                        cx.listener(move |this, _, _, cx| this.delete_download(&delete_id, cx)),
+                    ))
+            }
+            _ => controls,
+        }
     }
 }

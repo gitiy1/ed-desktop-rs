@@ -1,5 +1,6 @@
 mod actions;
 mod demo;
+mod file_actions;
 mod jobs;
 mod settings_view;
 mod shell;
@@ -13,6 +14,7 @@ pub use shell::run;
 use crate::api::{self, Book, Session};
 use crate::downloader::{self, DownloadProgress};
 use crate::export;
+use crate::file_actions::{DeleteOutcome, FileActions, NativeFileActions};
 use crate::filenames::export_stems;
 use crate::i18n::{self, LanguagePreference, Locale, Text};
 use crate::queue::{DownloadQueue, TaskState};
@@ -63,6 +65,8 @@ struct BookRow {
     received: u64,
     total: u64,
     speed: f64,
+    deleting: bool,
+    file_action_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +82,7 @@ enum DownloadState {
         cleanup_warning: Option<String>,
     },
     Failed(String),
+    Deleted(DeleteOutcome),
 }
 
 impl DownloadState {
@@ -107,7 +112,20 @@ impl DownloadState {
                 )
             }
             Self::Failed(message) => format!("{}: {message}", i18n::text(locale, Text::Failed)),
+            Self::Deleted(outcome) => i18n::text(
+                locale,
+                match outcome {
+                    DeleteOutcome::Trashed => Text::MovedToTrash,
+                    DeleteOutcome::PermanentlyDeleted => Text::PermanentlyDeleted,
+                    DeleteOutcome::AlreadyMissing => Text::FileMissing,
+                },
+            )
+            .to_string(),
         }
+    }
+
+    fn is_completed(&self) -> bool {
+        matches!(self, Self::Finished { .. } | Self::Deleted(_))
     }
 
     fn is_active(&self) -> bool {
@@ -137,6 +155,8 @@ impl BookRow {
             received: 0,
             total: 0,
             speed: 0.0,
+            deleting: false,
+            file_action_error: None,
         }
     }
 
@@ -174,6 +194,11 @@ enum UiEvent {
     },
     QueueDone,
     Message(String),
+    FileDeleted {
+        id: String,
+        path: PathBuf,
+        result: Result<DeleteOutcome>,
+    },
 }
 
 #[derive(Clone)]
@@ -215,6 +240,7 @@ pub struct AppView {
     busy: bool,
     persist_settings: bool,
     demo: bool,
+    file_actions: Arc<dyn FileActions>,
 }
 
 impl Drop for AppView {
@@ -285,6 +311,7 @@ impl AppView {
             busy: false,
             persist_settings: true,
             demo: false,
+            file_actions: Arc::new(NativeFileActions),
         }
     }
 
@@ -388,6 +415,7 @@ impl AppView {
                 self.download_control = None;
             }
             UiEvent::Message(message) => self.status = message,
+            UiEvent::FileDeleted { id, path, result } => self.file_deleted(&id, &path, result),
         }
     }
 
@@ -448,6 +476,8 @@ impl AppView {
                         received: row.received,
                         total: row.total,
                         speed: row.speed,
+                        deleting: row.deleting,
+                        file_action_error: row.file_action_error.clone(),
                     }
                 } else {
                     BookRow::new(book, locale)
